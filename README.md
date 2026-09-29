@@ -127,9 +127,11 @@ settings over your desktop picture.
 
 ## FileDrop
 
-The dashboard has a card for FileDrop, a separate LAN file-sharing server
-expected at `~/Library/Application Support/FileDrop`. It isn't part of this
-repo; without it, that card just reports that FileDrop isn't installed.
+The dashboard has a card for [FileDrop](https://github.com/yatharth1011/filedrop),
+a separate password-protected LAN file drop. Install it with its own
+`./install.sh` (into `~/Library/Application Support/FileDrop`), and the
+card can start it, copy its URL, and open it as its own window. Without it,
+the card just reports that FileDrop isn't installed.
 
 ## License
 
