@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Dromac</string>
+    <string name="accessibility_service_description">Lets the Dromac Mac dashboard tap and swipe on this phone while remote-controlling it. Does not read screen content.</string>
+</resources>

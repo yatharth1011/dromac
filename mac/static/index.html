@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Dromac</title>
+<meta name="theme-color" content="#050806" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<canvas id="glassCanvas" class="glass-canvas" hidden></canvas>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- Vertical-only blur (near-zero horizontal) so the prev/next lyric
+         lines read as if still moving along their roll direction, instead
+         of an even, static-looking blur. -->
+    <filter id="lyricsMotionBlur" x="-20%" y="-60%" width="140%" height="220%">
+      <feGaussianBlur stdDeviation="0.15 1.6" />
+    </filter>
+    <!-- Gentler version for the main line -- the shared filter above was
+         tuned for the small, permanently-blurred prev/next text; at the
+         main line's larger size it read as too strong. -->
+    <filter id="lyricsMotionBlurMain" x="-20%" y="-40%" width="140%" height="180%">
+      <feGaussianBlur stdDeviation="0.1 0.6" />
+    </filter>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 20 16" width="18" height="15" aria-hidden="true">
+      <rect x="0" y="6" width="3.2" height="10" rx="1"></rect>
+      <rect x="5.6" y="1" width="3.2" height="15" rx="1"></rect>
+      <rect x="11.2" y="7.5" width="3.2" height="8.5" rx="1"></rect>
+      <rect x="16.8" y="3.5" width="3.2" height="12.5" rx="1"></rect>
+    </svg>
+    <span class="brand-word">DROMAC</span>
+  </div>
+  <div id="clockText" class="clock-text"></div>
+  <div class="topbar-right">
+    <button id="btnTheme" class="theme-btn" title="Liquid glass theme" aria-label="Liquid glass theme">
+      <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M12 2.7c-.3 0-.6.1-.8.4C9.6 5.2 5.5 10.6 5.5 14.4a6.5 6.5 0 0 0 13 0c0-3.8-4.1-9.2-5.7-11.3a1 1 0 0 0-.8-.4zm-3.3 11.6a1 1 0 0 1 1 1 2.6 2.6 0 0 0 2.6 2.6 1 1 0 1 1 0 2 4.6 4.6 0 0 1-4.6-4.6 1 1 0 0 1 1-1z"/></svg>
+    </button>
+    <button id="connPill" class="pill pill-off">
+      <span class="dot"></span>
+      <span id="connText">Checking…</span>
+    </button>
+  </div>
+</header>
+
+<div id="themePanel" class="theme-panel hidden"></div>
+
+<div id="callBanner" class="call-banner hidden">
+  <span class="call-label">incoming call</span>
+  <span id="callNumber" class="tok-number"></span>
+  <button id="btnAnswerCall" class="btn btn--wide"><span>answer</span></button>
+</div>
+
+<main class="dashboard">
+
+  <section class="card now-playing area-now">
+    <div class="art-wrap">
+      <img id="artwork" class="art" alt="" />
+      <div id="artPlaceholder" class="art-placeholder">
+        <svg viewBox="0 0 24 24" width="36" height="36"><path fill="currentColor" d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+      </div>
+    </div>
+    <div class="track-info">
+      <div class="track-title-row">
+        <div id="trackTitle" class="track-title">Not connected</div>
+        <svg id="likeIcon" class="like-icon hidden" viewBox="0 0 24 24" width="15" height="15">
+          <path d="M12 21s-6.7-4.35-9.3-8.1C1 10.1 1.5 6.6 4.4 5.1c2.3-1.2 4.9-.3 6.6 1.6.5.55.5.55 1 0C13.7 4.8 16.3 3.9 18.6 5.1c2.9 1.5 3.4 5 1.7 7.8C18.7 16.65 12 21 12 21z"/>
+        </svg>
+      </div>
+      <div id="trackArtist" class="track-artist">Link your phone to get started</div>
+      <button id="btnLyrics" class="link-btn lyrics-toggle hidden">lyrics</button>
+    </div>
+    <div id="seekRow" class="seek-row hidden">
+      <span id="seekPos" class="seek-time tok-number">0:00</span>
+      <input id="seekSlider" type="range" min="0" max="1000" value="0" />
+      <span id="seekDur" class="seek-time tok-number">0:00</span>
+    </div>
+    <div id="lyricsTicker" class="lyrics-ticker hidden">
+      <div id="lyricsTickerPrev" class="lyrics-ticker-line lyrics-ticker-side"></div>
+      <div id="lyricsTickerLine" class="lyrics-ticker-line"></div>
+      <div id="lyricsTickerNext" class="lyrics-ticker-line lyrics-ticker-side"></div>
+    </div>
+    <div class="transport">
+      <button id="btnPrev" class="transport-btn" aria-label="Previous">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+      </button>
+      <button id="btnPlay" class="transport-btn transport-btn--main" aria-label="Play/Pause">
+        <svg id="iconPlay" viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+        <svg id="iconPause" viewBox="0 0 24 24" width="24" height="24" style="display:none"><path fill="currentColor" d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+      </button>
+      <button id="btnNext" class="transport-btn" aria-label="Next">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
+      </button>
+    </div>
+    <div id="rateRow" class="rate-row hidden">
+      <button id="btnDislike" class="rate-btn" aria-label="Dislike">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15 3H6c-.8 0-1.5.5-1.8 1.2l-3 7.2v2c0 1.1.9 2 2 2h6.3l-1 4.6v.3c0 .4.2.8.4 1.1L9.8 22l6.3-6.3c.3-.3.5-.8.5-1.3V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+      </button>
+      <button id="btnLike" class="rate-btn" aria-label="Like">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M9 21h10c.8 0 1.5-.5 1.8-1.2l3-7.2v-2c0-1.1-.9-2-2-2h-6.3l1-4.6V3.7c0-.4-.2-.8-.4-1.1L14.2 2 7.9 8.3c-.3.3-.5.8-.5 1.3V19c0 1.1.9 2 2 2zM1 21h4V9H1v12z"/></svg>
+      </button>
+    </div>
+    <div id="recentTracks" class="recent-tracks hidden">
+      <div class="recent-tracks-label">$ recently played</div>
+      <div id="recentTracksList" class="recent-tracks-list"></div>
+    </div>
+  </section>
+
+  <div class="col-middle area-device">
+  <section class="card device-card">
+    <div class="card-label">$ device</div>
+    <div class="device-row">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg>
+      <span id="deviceModel" class="tok-red">—</span>
+    </div>
+    <div class="battery-row">
+      <div class="battery-shell"><div id="batteryFill" class="battery-fill"></div></div>
+      <span id="batteryText" class="tok-number">—</span>
+    </div>
+    <div id="nextEventRow" class="meta-row hidden">next: <span id="nextEventText" class="tok-keyword"></span></div>
+    <div id="screenTimeRow" class="meta-row hidden">today: <span id="screenTimeText" class="tok-number"></span></div>
+  </section>
+
+  <section class="card area-volume">
+    <div class="card-label">$ volume</div>
+    <div class="volume-row">
+      <button id="volDown" class="icon-btn"><span>−</span></button>
+      <input id="volSlider" type="range" min="0" max="1000" value="0" />
+      <button id="volUp" class="icon-btn"><span>+</span></button>
+    </div>
+  </section>
+
+  <section class="card notifications-card area-notif">
+    <div class="card-label-row">
+      <div class="card-label">$ notifications</div>
+      <button id="btnClearNotifs" class="link-btn">clear all</button>
+    </div>
+    <div id="notifList" class="notif-list">
+      <p class="hint">no notifications yet</p>
+    </div>
+  </section>
+  </div>
+
+  <div class="col-right area-connection">
+  <section class="card connection-card">
+    <div class="card-label-row">
+      <div class="card-label">$ connection</div>
+      <button id="btnReconnect" class="link-btn">reconnect</button>
+    </div>
+    <div id="connDetail" class="conn-detail">no phone linked yet</div>
+    <div id="bleSignalRow" class="meta-row ble-signal-row"></div>
+
+    <button id="btnTogglePair" class="link-btn pair-toggle">+ link phone manually</button>
+    <div id="pairForm" class="pair-form hidden">
+      <p class="hint">Dromac finds the phone on its own (Bluetooth, then mDNS, then a
+      network search) — this is only needed if that hasn't connected yet.</p>
+      <div class="form-grid form-grid--connect">
+        <label>phone ip<input id="phoneHost" placeholder="192.168.1.23" /></label>
+        <label>port<input id="phonePort" placeholder="8822" inputmode="numeric" /></label>
+      </div>
+      <button id="btnConnect" class="btn btn--ghost"><span>connect</span></button>
+      <div id="pairStatus" class="pair-status"></div>
+    </div>
+  </section>
+
+  <section class="card quick-actions area-quick">
+    <div class="card-label">$ quick_actions</div>
+    <div class="quick-grid">
+      <button id="btnRing" class="grid-tile" title="ring phone"><span class="grid-tile-icon">&#9743;</span></button>
+      <button id="btnFlashlight" class="grid-tile" title="flashlight"><span class="grid-tile-icon">&#9728;</span></button>
+      <button id="btnDnd" class="grid-tile" title="do not disturb"><span class="grid-tile-icon">&#8856;</span></button>
+      <button id="btnWake" class="grid-tile" title="wake screen"><span class="grid-tile-icon">&#9211;</span></button>
+      <button id="btnKeepAwake" class="grid-tile" title="keep awake"><span class="grid-tile-icon">&#8734;</span></button>
+      <button id="btnLocate" class="grid-tile" title="locate phone"><span class="grid-tile-icon">&#9046;</span></button>
+      <button id="btnMirror" class="grid-tile" title="remote screen"><span class="grid-tile-icon">&#10697;</span></button>
+      <div id="lockRow" class="hidden">
+        <button id="btnLock" class="grid-tile" title="lock phone"><span class="grid-tile-icon">&#9919;</span></button>
+      </div>
+      <button id="btnCameraOpen" class="grid-tile" title="camera"><span class="grid-tile-icon">&#9678;</span></button>
+    </div>
+    <div id="appLaunchRow" class="app-launch-row">
+      <input id="appLaunchInput" list="appList" placeholder="launch an app…" />
+      <datalist id="appList"></datalist>
+      <button id="btnLaunchApp" class="btn btn--ghost"><span>open</span></button>
+    </div>
+    <div id="cameraThumbWrap" class="camera-thumb-wrap hidden">
+      <button id="btnCameraGallery" class="camera-gallery-icon" title="view photo"><span>&#9635;</span></button>
+      <span id="cameraThumbLabel" class="camera-thumb-label"></span>
+      <button id="btnCameraThumbSave" class="icon-btn" title="save to ~/Documents/Dromac"><span>&#8595;</span></button>
+      <button id="btnCameraThumbCopy" class="icon-btn" title="copy to clipboard"><span>&#9083;</span></button>
+    </div>
+    <div class="camera-folder-row">
+      <span class="camera-folder-label">~/Documents/Dromac</span>
+      <button id="btnCameraClearFolder" class="icon-btn" title="delete every saved photo in ~/Documents/Dromac"><span>&#9003;</span></button>
+    </div>
+    <div class="clipboard-row">
+      <input id="clipboardInput" placeholder="text to send to phone clipboard" />
+      <button id="btnClipboard" class="btn btn--ghost"><span>send</span></button>
+    </div>
+  </section>
+
+  <section class="card filedrop-card">
+    <div class="card-label-row">
+      <div class="card-label">$ filedrop</div>
+      <button id="btnFiledropStart" class="link-btn">start</button>
+    </div>
+    <div id="filedropStatus" class="conn-detail">not running</div>
+    <div id="filedropUrlRow" class="clipboard-row hidden">
+      <input id="filedropUrlText" readonly />
+      <button id="btnFiledropCopy" class="icon-btn" title="copy url"><span>&#9083;</span></button>
+      <button id="btnFiledropOpen" class="icon-btn" title="open as a Dromac window"><span>&#8599;</span></button>
+    </div>
+  </section>
+  </div>
+
+</main>
+
+<div id="mirrorOverlay" class="mirror-overlay hidden">
+  <div class="mirror-modal">
+    <div class="mirror-head">
+      <div class="card-label">$ remote_screen</div>
+      <button id="btnMirrorClose" class="notif-dismiss" title="close">×</button>
+    </div>
+    <div class="mirror-frame-wrap">
+      <img id="mirrorImg" class="mirror-frame" alt="phone screen" />
+      <div id="mirrorCursor" class="mirror-cursor"></div>
+      <div id="mirrorPlaceholder" class="mirror-placeholder">Starting…</div>
+    </div>
+    <p class="mirror-hint">Move like a trackpad: one finger points, two-finger scroll touches.<br>Click (or tap) to tap the phone.<br>Just type — keystrokes go straight to the phone while this is open.</p>
+    <div class="mirror-actions">
+      <button id="btnNavBack" class="icon-btn" title="back"><span>&#8592;</span></button>
+      <button id="btnNavHome" class="icon-btn" title="home"><span>&#9679;</span></button>
+      <button id="btnNavRecents" class="icon-btn" title="recents"><span>&#9633;</span></button>
+      <button id="btnMirrorBlackout" class="btn btn--ghost"><span>blackout</span></button>
+      <button id="btnMirrorStop" class="btn btn--ghost"><span>close</span></button>
+    </div>
+  </div>
+</div>
+
+<div id="cameraOverlay" class="mirror-overlay hidden">
+  <div class="mirror-modal">
+    <div class="mirror-head">
+      <div class="card-label">$ camera</div>
+      <button id="btnCameraClose" class="notif-dismiss" title="close">×</button>
+    </div>
+    <div class="mirror-frame-wrap">
+      <img id="cameraStreamImg" class="mirror-frame" alt="phone camera preview" />
+      <div id="cameraPlaceholder" class="mirror-placeholder">Starting…</div>
+    </div>
+    <div class="mirror-actions">
+      <button id="btnCameraSwitch" class="icon-btn" title="switch camera"><span>&#8635;</span></button>
+      <button id="btnCameraCapture" class="btn btn--ghost btn--wide"><span>capture</span></button>
+      <button id="btnCameraFlash" class="icon-btn" title="flash"><span>&#9889;</span></button>
+      <button id="btnCameraSave" class="icon-btn hidden" title="save to Documents/Dromac"><span>&#8595;</span></button>
+      <button id="btnCameraCopy" class="icon-btn hidden" title="copy to clipboard"><span>&#9083;</span></button>
+    </div>
+  </div>
+</div>
+
+<div id="photoPreviewOverlay" class="mirror-overlay hidden">
+  <div class="mirror-modal photo-preview-modal">
+    <div class="mirror-head">
+      <div class="card-label">$ photo</div>
+      <button id="btnPhotoPreviewClose" class="notif-dismiss" title="close">×</button>
+    </div>
+    <img id="photoPreviewImg" class="photo-preview-img" alt="captured photo" />
+  </div>
+</div>
+
+<div id="lyricsOverlay" class="lyrics-overlay hidden">
+  <div class="lyrics-modal">
+    <div class="lyrics-head">
+      <div class="card-label">$ lyrics · <span id="lyricsTrackName" class="tok-string"></span></div>
+      <button id="btnLyricsClose" class="notif-dismiss" title="close">×</button>
+    </div>
+    <div id="lyricsBody" class="lyrics-body">
+      <p class="hint">Loading…</p>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+<script src="glass.js"></script>
+</body>
+</html>

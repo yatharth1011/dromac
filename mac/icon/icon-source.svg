@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0b10"/>
+      <stop offset="100%" stop-color="#1a1424"/>
+    </linearGradient>
+    <radialGradient id="blob1" cx="20%" cy="15%" r="60%">
+      <stop offset="0%" stop-color="#7c5cff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="blob2" cx="85%" cy="80%" r="60%">
+      <stop offset="0%" stop-color="#ff5ea8" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#ff5ea8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="note" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e6ddff"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="228" fill="url(#blob1)"/>
+  <rect width="1024" height="1024" rx="228" fill="url(#blob2)"/>
+
+  <g transform="translate(512,512)">
+    <circle r="230" fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.25)" stroke-width="4"/>
+    <path d="M -60 90 V -70 L 110 -110 V 70" fill="none" stroke="url(#note)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+    <ellipse cx="-90" cy="95" rx="52" ry="42" fill="url(#note)"/>
+    <ellipse cx="80" cy="78" rx="52" ry="42" fill="url(#note)"/>
+  </g>
+
+  <rect width="1024" height="512" rx="228" fill="url(#glass)"/>
+</svg>

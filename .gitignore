@@ -1,0 +1,25 @@
+# Android build output / local config
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime state the Mac server writes next to itself when run from a checkout
+mac/state.json
+mac/server.log
+mac/server.pid
+mac/.pending/
+mac/.wallpaper/
+mac/chrome-profile/
+
+.DS_Store

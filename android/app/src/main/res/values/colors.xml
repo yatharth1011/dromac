@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#111113</color>
+    <color name="panel">#18191c</color>
+    <color name="accent">#33ff99</color>
+    <color name="fg">#e4e4e6</color>
+    <color name="fg_dim">#97989c</color>
+    <color name="fg_dimmer">#67686c</color>
+</resources>

@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:id="@+id/brandText"
+        android:text="DROMAC"
+        android:textColor="@color/accent"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="18dp" />
+
+    <TextView
+        android:id="@+id/ipText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/fg_dim"
+        android:textSize="12sp"
+        android:layout_marginBottom="12dp" />
+
+    <LinearLayout
+        android:id="@+id/statusContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:id="@+id/bleHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/fg_dimmer"
+        android:textSize="11sp"
+        android:lineSpacingExtra="4dp"
+        android:layout_marginBottom="6dp" />
+
+    <TextView
+        style="@style/DromacSectionLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="PERMISSIONS" />
+
+    <Button
+        android:id="@+id/notifAccessButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant Notification Access" />
+
+    <Button
+        android:id="@+id/batteryExemptButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Disable Battery Optimization" />
+
+    <Button
+        android:id="@+id/dndAccessButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant Do Not Disturb Access" />
+
+    <Button
+        android:id="@+id/usageAccessButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant Usage Access" />
+
+    <Button
+        android:id="@+id/overlayAccessButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant Display Over Apps" />
+
+    <Button
+        android:id="@+id/cameraAccessButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant Camera Access" />
+
+    <TextView
+        style="@style/DromacSectionLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="REMOTE CONTROL" />
+
+    <Button
+        android:id="@+id/lockAdminButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Enable Remote Lock" />
+
+    <Button
+        android:id="@+id/accessibilityButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Enable Remote Control" />
+
+    <Button
+        android:id="@+id/keyboardButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Enable Remote Keyboard" />
+
+    <Button
+        android:id="@+id/mirrorConsentButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Start Screen Sharing" />
+
+    <Button
+        android:id="@+id/mirrorStopButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Stop Screen Sharing" />
+
+    <TextView
+        style="@style/DromacSectionLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="CAMERA" />
+
+    <Button
+        android:id="@+id/openCameraButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="0dp"
+        android:text="Open Camera" />
+
+</LinearLayout>
+</ScrollView>
