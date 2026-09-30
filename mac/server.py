@@ -75,6 +75,58 @@ def start_filedrop():
     return status
 
 
+# CodeGate is its own project (github.com/yatharth1011/codegate) with its own
+# server: Dromac just checks whether it's up, starts it if not, and drives its
+# admin API, which only answers loopback requests carrying X-CodeGate-Local.
+CODEGATE_DIR = Path.home() / "Library" / "Application Support" / "CodeGate"
+CODEGATE_SERVER = CODEGATE_DIR / "server.py"
+CODEGATE_PORT = 8902
+
+
+def codegate_up():
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{CODEGATE_PORT}/", timeout=1.5):
+            return True
+    except Exception:
+        return False
+
+
+def start_codegate():
+    if codegate_up():
+        return True, None
+    if not CODEGATE_SERVER.exists():
+        return False, "CodeGate isn't installed (github.com/yatharth1011/codegate)"
+    with open(CODEGATE_DIR / "server.log", "a") as log_file:
+        subprocess.Popen(
+            [sys.executable, str(CODEGATE_SERVER)],
+            stdout=log_file, stderr=log_file,
+            cwd=str(CODEGATE_DIR), start_new_session=True,
+        )
+    for _ in range(60):  # up to ~6s for it to come up
+        time.sleep(0.1)
+        if codegate_up():
+            return True, None
+    return False, "CodeGate didn't start (see server.log in its folder)"
+
+
+def codegate_request(method, path, body=None, timeout=10):
+    data = json.dumps(body or {}).encode() if method == "POST" else None
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{CODEGATE_PORT}{path}", data=data, method=method,
+        headers={"X-CodeGate-Local": "1", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read())
+        except Exception:
+            return {"error": f"CodeGate returned {e.code}"}
+    except Exception:
+        return {"codegateRunning": False}
+
+
 CHROME_BINARY = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 _FOCUS_FILEDROP_SCRIPT = '''
@@ -129,27 +181,6 @@ def open_filedrop_window(url):
     # Chrome a moment to create it, then bring it to the front explicitly --
     # a freshly opened app-mode window doesn't always steal focus on its own.
     threading.Timer(0.8, _focus_filedrop_window).start()
-
-
-def filedrop_spaces_request(method, path, body=None, timeout=10):
-    """FileDrop's CodeGate controls (rooms, members, starters) only answer loopback
-    requests carrying X-FileDrop-Local, so a web page can't drive them --
-    Dromac is that trusted local caller."""
-    data = json.dumps(body or {}).encode() if method == "POST" else None
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{FILEDROP_PORT}{path}", data=data, method=method,
-        headers={"X-FileDrop-Local": "1", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        try:
-            return json.loads(e.read())
-        except Exception:
-            return {"error": f"FileDrop returned {e.code}"}
-    except Exception:
-        return {"filedropRunning": False}
 
 
 def pick_folder(prompt="Choose a folder"):
@@ -1303,8 +1334,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/filedrop/status":
             return self._json(filedrop_status())
 
-        if p == "/api/spaces/status":
-            return self._json(filedrop_spaces_request("GET", "/api/spaces/status"))
+        if p == "/api/codegate/status":
+            if not codegate_up():
+                return self._json({"codegateRunning": False, "installed": CODEGATE_SERVER.exists()})
+            return self._json(codegate_request("GET", "/api/status"))
 
         if p in ("/api/rainy/state", "/api/rainy/wallpaper"):
             # Rainy's bridge only answers requests whose Host is loopback
@@ -1634,15 +1667,15 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/filedrop/start":
             return self._json(start_filedrop())
 
-        if p == "/api/spaces/pick_folder":
+        if p == "/api/codegate/pick_folder":
             return self._json({"folder": pick_folder("Choose the starter files folder")})
 
-        if p.startswith("/api/spaces/"):
-            status = start_filedrop()
-            if not status["running"]:
-                return self._json({"error": status.get("error", "FileDrop did not start")}, 502)
+        if p.startswith("/api/codegate/"):
+            ok, err = start_codegate()
+            if not ok:
+                return self._json({"error": err}, 502)
             # Exporting zips a whole workspace, and opening a room can boot the VM.
-            result = filedrop_spaces_request("POST", p, body, timeout=120)
+            result = codegate_request("POST", "/api/" + p[len("/api/codegate/"):], body, timeout=120)
             return self._json(result, 400 if "error" in result else 200)
 
         if p == "/api/filedrop/open_window":

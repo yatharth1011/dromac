@@ -1296,11 +1296,6 @@ body.theme-glass-fallback {
 
 /* ---------- CodeGate (FileDrop card + manager) ---------- */
 
-.code-block {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
 .cg-room-buttons { display: flex; gap: 6px; margin-top: 4px; }
 .cg-room-btn { margin-bottom: 0; font-size: 11px; padding: 8px 4px; }
 .cg-room-btn.cg-open { border-color: var(--warn); color: var(--warn); }

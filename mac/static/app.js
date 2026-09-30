@@ -1462,8 +1462,10 @@ function cgFmtPin(pin) {
 }
 
 function cgRenderSummary(st) {
-  if (!st || st.filedropRunning === false || st.error) {
-    cgSummary.textContent = (st && st.error) || "FileDrop isn't running (start it above)";
+  if (!st || st.codegateRunning === false || st.error) {
+    cgSummary.textContent = (st && st.error) || (st && st.installed === false
+      ? "not installed (github.com/yatharth1011/codegate)"
+      : "not running (it starts when you open a room)");
     cgUrlRow.classList.add("hidden");
     document.querySelectorAll(".cg-room-btn").forEach((b) => b.classList.remove("cg-open"));
     return;
@@ -1484,8 +1486,8 @@ function cgRenderSummary(st) {
 }
 
 function cgRenderManager(st) {
-  if (!st || st.filedropRunning === false) {
-    cgBody.innerHTML = '<p class="hint">FileDrop isn\'t running. Start it from the FileDrop card first.</p>';
+  if (!st || st.codegateRunning === false) {
+    cgBody.innerHTML = '<p class="hint">CodeGate isn\'t running. Opening a room from the card starts it.</p>';
     return;
   }
   const rt = st.runtime;
@@ -1549,9 +1551,9 @@ function cgRenderManager(st) {
 
 async function cgRefresh() {
   try {
-    cgState = await api("/api/spaces/status");
+    cgState = await api("/api/codegate/status");
   } catch (e) {
-    cgState = { filedropRunning: false };
+    cgState = { codegateRunning: false };
   }
   cgRenderSummary(cgState);
   if (!cgOverlay.classList.contains("hidden") && document.activeElement?.tagName !== "INPUT") cgRenderManager(cgState);
@@ -1561,7 +1563,7 @@ async function cgAct(action, payload) {
   if (cgBusy) return;
   cgBusy = true;
   try {
-    const res = await post("/api/spaces/" + action, payload || {});
+    const res = await post("/api/codegate/" + action, payload || {});
     cgNotice = res.error ? res.error : (res.exported ? `Saved ${res.exported} zip${res.exported === 1 ? "" : "s"} to ${res.folder}` : "");
     if (!res.error) cgState = res;
   } catch (e) {
@@ -1624,7 +1626,7 @@ cgBody.addEventListener("click", async (e) => {
       if (window.confirm(`Remove starter "${d.slug}"? Copies members already have are kept.`)) cgAct("delete_starter", { slug: d.slug });
       break;
     case "add-starter": {
-      const picked = await post("/api/spaces/pick_folder");
+      const picked = await post("/api/codegate/pick_folder");
       if (!picked.folder) return;
       const folder = picked.folder.replace(/\/$/, "");
       const base = folder.split("/").pop();

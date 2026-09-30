@@ -133,14 +133,19 @@ a separate password-protected LAN file drop. Install it with its own
 card can start it, copy its URL, and open it as its own window. Without it,
 the card just reports that FileDrop isn't installed.
 
-The card also runs **CodeGate**, FileDrop's PIN-protected rooms where people on
-your network get their own private VS Code or Ubuntu desktop in the browser,
-each in an isolated container with their own copy of the files you set up.
-The dashboard opens rooms (with a warning first), shows each room's PIN and the
-join URL, and has a manager for rooms, starter files, members (stop, save
+## CodeGate
+
+The dashboard has a separate `$ codegate` card for
+[CodeGate](https://github.com/yatharth1011/codegate): PIN-protected rooms where
+people on your network get their own private VS Code or Ubuntu desktop in the
+browser, each in an isolated container with their own copy of the files you set
+up. Install it with its own `./install.sh` (into
+`~/Library/Application Support/CodeGate`), and the card starts it when you open
+a room. The dashboard warns you before opening one, shows each room's PIN and
+the join URL, and has a manager for rooms, starter files, members (stop, save
 their work as a zip, remove), an internet switch and the container runtime.
-See FileDrop's README for how it's isolated and what it needs (Colima +
-Docker).
+Without it, the card just says CodeGate isn't installed. See its README for how
+it's isolated and what it needs (Colima + Docker).
 
 ## License
 
