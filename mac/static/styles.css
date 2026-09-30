@@ -1294,14 +1294,41 @@ body.theme-glass-fallback {
   background: var(--panel);
 }
 
-/* ---------- VS Code (FileDrop card) ---------- */
+/* ---------- CodeGate (FileDrop card + manager) ---------- */
 
 .code-block {
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
-.code-start { width: auto; padding: 0 14px; margin-bottom: 0; }
-.code-start:hover { border-color: var(--bad); color: var(--bad); }
-.code-stop { color: var(--bad); }
-.code-running { color: var(--warn); }
+.cg-room-buttons { display: flex; gap: 6px; margin-top: 4px; }
+.cg-room-btn { margin-bottom: 0; font-size: 11px; padding: 8px 4px; }
+.cg-room-btn.cg-open { border-color: var(--warn); color: var(--warn); }
+
+.cg-modal { width: 560px; height: min(680px, calc(100vh - 60px)); background: rgba(12, 12, 15, 0.96); }
+.cg-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.cg-sec { border-top: 1px solid var(--border); padding: 12px 0 6px; }
+.cg-sec:first-child { border-top: 0; padding-top: 0; }
+.cg-sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--fg-dimmer); margin-bottom: 8px; }
+.cg-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; font-size: 12px; }
+.cg-row .dim { color: var(--fg-dimmer); font-size: 11px; }
+.cg-acts { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+.cg-pin {
+  font-size: 20px; font-weight: 800; letter-spacing: 3px; color: var(--fg);
+  background: var(--panel2); border: 1px dashed var(--border-strong); border-radius: 10px;
+  padding: 6px 12px; user-select: all;
+}
+.cg-mini {
+  background: transparent; border: 1px solid var(--border-strong); border-radius: 8px;
+  color: var(--fg); font-size: 11px; font-weight: 600; padding: 5px 9px; cursor: pointer;
+}
+.cg-mini:hover { border-color: var(--accent1); }
+.cg-mini.danger { color: var(--bad); }
+.cg-mini.danger:hover { border-color: var(--bad); }
+.cg-mini.warn { color: var(--warn); border-color: var(--warn); }
+.cg-num { width: 44px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--fg); padding: 4px 6px; font: inherit; font-size: 11px; text-align: center; }
+.cg-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; background: var(--fg-dimmer); }
+.cg-dot.on { background: var(--good); }
+.cg-note { font-size: 11px; color: var(--fg-dimmer); line-height: 1.5; margin: 4px 0 0; }
+.cg-badge { font-size: 10px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 7px; color: var(--fg-dim); }

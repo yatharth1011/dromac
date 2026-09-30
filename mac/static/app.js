@@ -1441,88 +1441,209 @@ $("btnFiledropOpen").onclick = () => post("/api/filedrop/open_window");
 checkFiledropStatus();
 setInterval(checkFiledropStatus, 15000);
 
-// ---- CodeGate: VS Code in the browser (served by FileDrop, gated by the Mac password) ----
+// ---- CodeGate: rooms of per-member workspaces (served by FileDrop) ----
 
-const codeFolder = $("codeFolder");
-const codeStatusEl = $("codeStatus");
-const codeUrlRow = $("codeUrlRow");
-const codeUrlText = $("codeUrlText");
-const btnCodeStart = $("btnCodeStart");
-const btnCodeStop = $("btnCodeStop");
-const CODE_FOLDER_KEY = "dromac.codeFolder";
+const CG_KINDS = { code: "VS Code", desktop: "Ubuntu desktop" };
+const cgOverlay = $("cgOverlay");
+const cgBody = $("cgBody");
+const cgSummary = $("cgSummary");
+const cgUrlRow = $("cgUrlRow");
+const cgUrlText = $("cgUrlText");
+let cgState = null;
+let cgBusy = false;
+let cgNotice = "";
 
-try { codeFolder.value = localStorage.getItem(CODE_FOLDER_KEY) || ""; } catch (e) {}
-
-function clockTime(epochSeconds) {
+function cgTime(epochSeconds) {
   return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-function renderCode(st) {
-  const running = !!(st && st.running);
-  codeUrlRow.classList.toggle("hidden", !running);
-  btnCodeStop.classList.toggle("hidden", !running);
-  codeStatusEl.classList.toggle("code-running", running);
-  if (running) {
-    codeUrlText.value = st.url;
-    const folderName = (st.folder || "").split("/").filter(Boolean).pop() || st.folder;
-    const stops = st.idleStopsAt
-      ? `stops ${clockTime(st.idleStopsAt)} if no tab reopens`
-      : `open tab connected · stops by ${clockTime(st.stopsAt)} at the latest`;
-    codeStatusEl.textContent = `running on ${folderName} · ${stops}`;
-  } else if (st && st.error) {
-    codeStatusEl.textContent = st.error;
-  } else if (st && st.installed === false) {
-    codeStatusEl.textContent = "code-server isn't installed (brew install code-server)";
-  } else {
-    codeStatusEl.textContent = "not running";
-  }
+function cgFmtPin(pin) {
+  return pin ? pin.slice(0, 4) + "-" + pin.slice(4) : "";
 }
 
-async function checkCodeStatus() {
-  try { renderCode(await api("/api/code/status")); } catch (e) {}
-}
-
-$("btnCodePick").onclick = async () => {
-  const res = await post("/api/code/pick_folder");
-  if (res && res.folder) {
-    codeFolder.value = res.folder.replace(/\/$/, "") || res.folder;
-  }
-};
-
-btnCodeStart.onclick = async () => {
-  const folder = codeFolder.value.trim();
-  if (!folder) {
-    codeStatusEl.textContent = "pick a folder first";
+function cgRenderSummary(st) {
+  if (!st || st.filedropRunning === false || st.error) {
+    cgSummary.textContent = (st && st.error) || "FileDrop isn't running (start it above)";
+    cgUrlRow.classList.add("hidden");
+    document.querySelectorAll(".cg-room-btn").forEach((b) => b.classList.remove("cg-open"));
     return;
   }
-  const ok = window.confirm(
-    `⚠️ DANGER: start CodeGate (VS Code) on "${folder}"?\n\n` +
-    "Anyone who unlocks it (Touch ID on this Mac, or your Mac password) gets VS Code with a " +
-    "terminal, Python and Jupyter that can run code, and change or delete anything in this folder.\n\n" +
-    "A macOS sandbox keeps all of it inside this folder: no access to your other files, " +
-    "SSH keys, keychain or other apps.\n\n" +
-    "Only unlock it on devices you trust. Every unlock shows a notification here. " +
-    "It stops 30 min after the last tab closes, and after 8 hours regardless."
-  );
-  if (!ok) return;
-  try { localStorage.setItem(CODE_FOLDER_KEY, folder); } catch (e) {}
-  codeStatusEl.textContent = "starting…";
-  const st = await post("/api/code/start", { folder });
-  renderCode(st);
-  if (st && st.running && st.url) {
-    navigator.clipboard.writeText(st.url).catch(() => {});
-    codeStatusEl.textContent += " · URL copied";
+  const parts = [];
+  for (const [kind, room] of Object.entries(st.rooms)) {
+    const btn = document.querySelector(`.cg-room-btn[data-kind="${kind}"]`);
+    if (btn) btn.classList.toggle("cg-open", room.open);
+    if (room.open) parts.push(`${room.label}: PIN ${cgFmtPin(room.pin)}`);
   }
+  const running = st.members.filter((m) => m.running).length;
+  cgSummary.textContent = parts.length
+    ? `${parts.join(" · ")} · ${running} active`
+    : (running ? `${running} active, no room open` : "no room open");
+  const showUrl = st.gate && st.gate.running;
+  cgUrlRow.classList.toggle("hidden", !showUrl);
+  if (showUrl) cgUrlText.value = st.gate.url;
+}
+
+function cgRenderManager(st) {
+  if (!st || st.filedropRunning === false) {
+    cgBody.innerHTML = '<p class="hint">FileDrop isn\'t running. Start it from the FileDrop card first.</p>';
+    return;
+  }
+  const rt = st.runtime;
+  let html = "";
+  if (cgNotice) html += `<div class="cg-sec"><div class="cg-note">${esc(cgNotice)}</div></div>`;
+
+  // Rooms
+  html += '<div class="cg-sec"><div class="cg-sec-title">ROOMS</div>';
+  for (const [kind, room] of Object.entries(st.rooms)) {
+    const built = st.images[kind];
+    html += `<div class="cg-row"><div><span class="cg-dot ${room.open ? "on" : ""}"></span>${esc(room.label)}
+        <div class="dim">${room.members} member${room.members === 1 ? "" : "s"} · up to
+        <input class="cg-num" type="number" min="1" max="30" value="${room.maxRunning}" data-act="limit" data-kind="${kind}"> at once</div></div>
+      <div class="cg-acts">${
+        room.open
+          ? `<span class="cg-pin">${esc(cgFmtPin(room.pin))}</span>
+             <button class="cg-mini" data-act="copy-pin" data-pin="${esc(room.pin)}">copy</button>
+             <button class="cg-mini warn" data-act="close" data-kind="${kind}">close</button>`
+          : (built === false
+              ? `<button class="cg-mini" data-act="build" data-kind="${kind}">${st.building.includes(kind) ? "building…" : "build image"}</button>`
+              : `<button class="cg-mini" data-act="open" data-kind="${kind}">open room</button>`)
+      }</div></div>`;
+  }
+  html += '<div class="cg-note">A PIN lets a new person join with a name of their choice; closing a room stops new joins but keeps current members. PINs expire after 12 hours.</div></div>';
+
+  // Starters
+  html += '<div class="cg-sec"><div class="cg-sec-title">STARTER FILES</div>';
+  if (!st.starters.length) html += '<div class="cg-note">None yet. Each member gets their own copy of these when they first open their workspace.</div>';
+  for (const a of st.starters) {
+    html += `<div class="cg-row"><div>${esc(a.title)} <span class="dim">${esc(a.slug)} · ${a.files} files</span></div>
+      <div class="cg-acts"><button class="cg-mini" data-act="collect" data-starter="${esc(a.slug)}" data-id="*">save everyone's</button>
+      <button class="cg-mini danger" data-act="del-starter" data-slug="${esc(a.slug)}">remove</button></div></div>`;
+  }
+  html += '<div class="cg-row"><span></span><button class="cg-mini" data-act="add-starter">+ add from folder…</button></div></div>';
+
+  // Members
+  html += '<div class="cg-sec"><div class="cg-sec-title">MEMBERS</div>';
+  if (!st.members.length) html += '<div class="cg-note">Nobody has joined yet.</div>';
+  for (const m of st.members) {
+    html += `<div class="cg-row"><div><span class="cg-dot ${m.running ? "on" : ""}"></span>${esc(m.name)}
+        <span class="cg-badge">${esc(CG_KINDS[m.kind] || m.kind)}</span>
+        <div class="dim">${m.running ? "active" : "idle"}${m.ip ? " · " + esc(m.ip) : ""}${m.lastSeen ? " · seen " + cgTime(m.lastSeen) : ""}</div></div>
+      <div class="cg-acts">
+        ${m.running ? `<button class="cg-mini" data-act="stop-member" data-id="${esc(m.id)}">stop</button>` : ""}
+        <button class="cg-mini" data-act="collect" data-id="${esc(m.id)}">save zip</button>
+        <button class="cg-mini danger" data-act="remove-member" data-id="${esc(m.id)}" data-name="${esc(m.name)}">remove</button></div></div>`;
+  }
+  if (st.members.length) html += '<div class="cg-row"><span></span><button class="cg-mini" data-act="collect" data-id="*">save everyone\'s work</button></div>';
+  html += '<div class="cg-note">Saved zips go to ~/Documents/CodeGate Collected.</div></div>';
+
+  // Network + runtime
+  html += `<div class="cg-sec"><div class="cg-sec-title">SAFETY</div>
+    <div class="cg-row"><div>Internet access for members
+      <div class="dim">Members can never reach this Mac, your network, or each other.</div></div>
+      <div class="cg-acts"><button class="cg-mini ${st.internet ? "" : "warn"}" data-act="internet" data-on="${st.internet ? 0 : 1}">${st.internet ? "on · turn off" : "off · turn on"}</button></div></div>
+    <div class="cg-row"><div>Container runtime <div class="dim">${!rt.installed ? "not installed (brew install colima docker)" : rt.up ? "running" : rt.starting ? "starting…" : "stopped"}</div></div>
+      <div class="cg-acts">${rt.installed && !rt.up && !rt.starting ? '<button class="cg-mini" data-act="runtime">start</button>' : ""}
+      <button class="cg-mini danger" data-act="stop-all">stop everything</button></div></div></div>`;
+  cgBody.innerHTML = html;
+}
+
+async function cgRefresh() {
+  try {
+    cgState = await api("/api/spaces/status");
+  } catch (e) {
+    cgState = { filedropRunning: false };
+  }
+  cgRenderSummary(cgState);
+  if (!cgOverlay.classList.contains("hidden") && document.activeElement?.tagName !== "INPUT") cgRenderManager(cgState);
+}
+
+async function cgAct(action, payload) {
+  if (cgBusy) return;
+  cgBusy = true;
+  try {
+    const res = await post("/api/spaces/" + action, payload || {});
+    cgNotice = res.error ? res.error : (res.exported ? `Saved ${res.exported} zip${res.exported === 1 ? "" : "s"} to ${res.folder}` : "");
+    if (!res.error) cgState = res;
+  } catch (e) {
+    cgNotice = "Couldn't reach FileDrop.";
+  } finally {
+    cgBusy = false;
+  }
+  cgRenderSummary(cgState);
+  cgRenderManager(cgState);
+}
+
+const CG_OPEN_WARNING = (kind) =>
+  `⚠️ Open the ${CG_KINDS[kind]} room?\n\n` +
+  "Anyone on the network who gets the PIN can join and run code in their own container on this Mac.\n\n" +
+  "Each container is limited (CPU, memory, processes, disk), can't see your files, this Mac, your local network or other members, and is removed when it goes idle. " +
+  "Their work is kept until you remove them.\n\n" +
+  "Share the PIN only with people you intend to let in. It expires after 12 hours.";
+
+document.querySelectorAll(".cg-room-btn").forEach((btn) => {
+  btn.onclick = () => {
+    const kind = btn.dataset.kind;
+    const open = cgState && cgState.rooms && cgState.rooms[kind] && cgState.rooms[kind].open;
+    if (open) return cgAct("close", { kind });
+    if (window.confirm(CG_OPEN_WARNING(kind))) cgAct("open", { kind });
+  };
+});
+
+$("btnCgManage").onclick = () => {
+  cgOverlay.classList.remove("hidden");
+  cgRenderManager(cgState);
+  cgRefresh();
+};
+$("btnCgClose").onclick = () => cgOverlay.classList.add("hidden");
+$("btnCgCopy").onclick = () => {
+  if (cgUrlText.value) navigator.clipboard.writeText(cgUrlText.value).catch(() => {});
 };
 
-btnCodeStop.onclick = async () => renderCode(await post("/api/code/stop"));
+cgBody.addEventListener("click", async (e) => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const d = el.dataset;
+  switch (d.act) {
+    case "open":
+      if (window.confirm(CG_OPEN_WARNING(d.kind))) cgAct("open", { kind: d.kind });
+      break;
+    case "close": cgAct("close", { kind: d.kind }); break;
+    case "copy-pin": navigator.clipboard.writeText(d.pin).catch(() => {}); el.textContent = "copied"; break;
+    case "build": cgAct("build_image", { kind: d.kind }); break;
+    case "internet": cgAct("set_internet", { on: d.on === "1" }); break;
+    case "runtime": cgAct("start_runtime"); break;
+    case "stop-all":
+      if (window.confirm("Stop every workspace and close all rooms? Members keep their saved work.")) cgAct("stop_all");
+      break;
+    case "stop-member": cgAct("stop_member", { id: d.id }); break;
+    case "remove-member":
+      if (window.confirm(`Remove ${d.name} and permanently delete their workspace? Save their zip first if you need it.`)) cgAct("remove_member", { id: d.id });
+      break;
+    case "collect": cgAct("export", { id: d.id, starter: d.starter || "" }); break;
+    case "del-starter":
+      if (window.confirm(`Remove starter "${d.slug}"? Copies members already have are kept.`)) cgAct("delete_starter", { slug: d.slug });
+      break;
+    case "add-starter": {
+      const picked = await post("/api/spaces/pick_folder");
+      if (!picked.folder) return;
+      const folder = picked.folder.replace(/\/$/, "");
+      const base = folder.split("/").pop();
+      const slug = base.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "starter";
+      const title = window.prompt("Name for this starter:", base);
+      if (title === null) return;
+      cgAct("add_starter", { slug, title: title || base, folder });
+      break;
+    }
+  }
+});
 
-$("btnCodeCopy").onclick = () => {
-  if (codeUrlText.value) navigator.clipboard.writeText(codeUrlText.value).catch(() => {});
-};
+cgBody.addEventListener("change", (e) => {
+  const el = e.target.closest('[data-act="limit"]');
+  if (el) cgAct("set_limit", { kind: el.dataset.kind, n: parseInt(el.value, 10) });
+});
 
-checkCodeStatus();
-setInterval(checkCodeStatus, 15000);
+cgRefresh();
+setInterval(() => { if (!document.hidden) cgRefresh(); }, 5000);
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(() => {});

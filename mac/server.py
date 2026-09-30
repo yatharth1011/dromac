@@ -131,10 +131,10 @@ def open_filedrop_window(url):
     threading.Timer(0.8, _focus_filedrop_window).start()
 
 
-def filedrop_code_request(method, path, body=None, timeout=10):
-    """FileDrop's CodeGate (VS Code) controls only answer loopback requests carrying
-    X-FileDrop-Local (so a web page can't drive them) -- Dromac is that
-    trusted local caller."""
+def filedrop_spaces_request(method, path, body=None, timeout=10):
+    """FileDrop's CodeGate controls (rooms, members, starters) only answer loopback
+    requests carrying X-FileDrop-Local, so a web page can't drive them --
+    Dromac is that trusted local caller."""
     data = json.dumps(body or {}).encode() if method == "POST" else None
     req = urllib.request.Request(
         f"http://127.0.0.1:{FILEDROP_PORT}{path}", data=data, method=method,
@@ -149,14 +149,14 @@ def filedrop_code_request(method, path, body=None, timeout=10):
         except Exception:
             return {"error": f"FileDrop returned {e.code}"}
     except Exception:
-        return {"running": False, "filedropRunning": False}
+        return {"filedropRunning": False}
 
 
-def pick_folder():
+def pick_folder(prompt="Choose a folder"):
     """Native macOS folder picker; None if cancelled."""
     try:
         out = subprocess.run(
-            ["osascript", "-e", 'POSIX path of (choose folder with prompt "Folder to open in CodeGate")'],
+            ["osascript", "-e", 'POSIX path of (choose folder with prompt "' + prompt.replace('"', "") + '")'],
             capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired:
@@ -1303,8 +1303,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/filedrop/status":
             return self._json(filedrop_status())
 
-        if p == "/api/code/status":
-            return self._json(filedrop_code_request("GET", "/api/code/status"))
+        if p == "/api/spaces/status":
+            return self._json(filedrop_spaces_request("GET", "/api/spaces/status"))
 
         if p in ("/api/rainy/state", "/api/rainy/wallpaper"):
             # Rainy's bridge only answers requests whose Host is loopback
@@ -1634,17 +1634,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/filedrop/start":
             return self._json(start_filedrop())
 
-        if p == "/api/code/start":
+        if p == "/api/spaces/pick_folder":
+            return self._json({"folder": pick_folder("Choose the starter files folder")})
+
+        if p.startswith("/api/spaces/"):
             status = start_filedrop()
             if not status["running"]:
                 return self._json({"error": status.get("error", "FileDrop did not start")}, 502)
-            return self._json(filedrop_code_request("POST", "/api/code/start", {"folder": body.get("folder", "")}, timeout=60))
-
-        if p == "/api/code/stop":
-            return self._json(filedrop_code_request("POST", "/api/code/stop"))
-
-        if p == "/api/code/pick_folder":
-            return self._json({"folder": pick_folder()})
+            # Exporting zips a whole workspace, and opening a room can boot the VM.
+            result = filedrop_spaces_request("POST", p, body, timeout=120)
+            return self._json(result, 400 if "error" in result else 200)
 
         if p == "/api/filedrop/open_window":
             status = start_filedrop()

@@ -226,17 +226,16 @@
     <div class="code-block">
       <div class="card-label-row">
         <div class="card-label">$ codegate</div>
-        <button id="btnCodeStop" class="link-btn code-stop hidden">stop</button>
+        <button id="btnCgManage" class="link-btn">manage</button>
       </div>
-      <div class="clipboard-row">
-        <input id="codeFolder" placeholder="folder to open in CodeGate (VS Code)" spellcheck="false" />
-        <button id="btnCodePick" class="icon-btn" title="choose folder"><span>&#8943;</span></button>
-        <button id="btnCodeStart" class="btn btn--ghost code-start"><span>start</span></button>
+      <div class="cg-room-buttons">
+        <button id="btnCgCode" class="btn btn--ghost cg-room-btn" data-kind="code"><span>VS Code</span></button>
+        <button id="btnCgDesktop" class="btn btn--ghost cg-room-btn" data-kind="desktop"><span>Ubuntu desktop</span></button>
       </div>
-      <div id="codeStatus" class="conn-detail"></div>
-      <div id="codeUrlRow" class="clipboard-row hidden">
-        <input id="codeUrlText" readonly />
-        <button id="btnCodeCopy" class="icon-btn" title="copy url"><span>&#9083;</span></button>
+      <div id="cgSummary" class="conn-detail"></div>
+      <div id="cgUrlRow" class="clipboard-row hidden">
+        <input id="cgUrlText" readonly />
+        <button id="btnCgCopy" class="icon-btn" title="copy join url"><span>&#9083;</span></button>
       </div>
     </div>
   </section>
@@ -293,6 +292,16 @@
       <button id="btnPhotoPreviewClose" class="notif-dismiss" title="close">×</button>
     </div>
     <img id="photoPreviewImg" class="photo-preview-img" alt="captured photo" />
+  </div>
+</div>
+
+<div id="cgOverlay" class="lyrics-overlay hidden">
+  <div class="lyrics-modal cg-modal">
+    <div class="lyrics-head">
+      <div class="card-label">$ codegate</div>
+      <button id="btnCgClose" class="notif-dismiss" title="close">×</button>
+    </div>
+    <div id="cgBody" class="cg-body"><p class="hint">Loading…</p></div>
   </div>
 </div>
 
