@@ -133,12 +133,14 @@ a separate password-protected LAN file drop. Install it with its own
 card can start it, copy its URL, and open it as its own window. Without it,
 the card just reports that FileDrop isn't installed.
 
-The card also starts **CodeGate**, FileDrop's VS Code in the browser, on a folder you
-pick (type a path or use the ⋯ picker). It shows a danger warning first,
-because that window includes a terminal that can run code and change anything in
-that folder (sandboxed to it, and unlocked with Touch ID or your Mac password).
-Then it copies the URL. The card shows when it will auto-stop,
-and has a stop button. See FileDrop's README for the security model.
+The card also runs **CodeGate**, FileDrop's PIN-protected rooms where people on
+your network get their own private VS Code or Ubuntu desktop in the browser,
+each in an isolated container with their own copy of the files you set up.
+The dashboard opens rooms (with a warning first), shows each room's PIN and the
+join URL, and has a manager for rooms, starter files, members (stop, save
+their work as a zip, remove), an internet switch and the container runtime.
+See FileDrop's README for how it's isolated and what it needs (Colima +
+Docker).
 
 ## License
 
