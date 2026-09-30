@@ -1532,6 +1532,7 @@ function cgRenderManager(st) {
         <div class="dim">${m.running ? "active" : "idle"}${m.ip ? " · " + esc(m.ip) : ""}${m.lastSeen ? " · seen " + cgTime(m.lastSeen) : ""}</div></div>
       <div class="cg-acts">
         ${m.running ? `<button class="cg-mini" data-act="stop-member" data-id="${esc(m.id)}">stop</button>` : ""}
+        <button class="cg-mini" data-act="new-code" data-id="${esc(m.id)}" title="They lost their resume code">new code</button>
         <button class="cg-mini" data-act="collect" data-id="${esc(m.id)}">save zip</button>
         <button class="cg-mini danger" data-act="remove-member" data-id="${esc(m.id)}" data-name="${esc(m.name)}">remove</button></div></div>`;
   }
@@ -1564,7 +1565,10 @@ async function cgAct(action, payload) {
   cgBusy = true;
   try {
     const res = await post("/api/codegate/" + action, payload || {});
-    cgNotice = res.error ? res.error : (res.exported ? `Saved ${res.exported} zip${res.exported === 1 ? "" : "s"} to ${res.folder}` : "");
+    cgNotice = res.error ? res.error
+      : res.code ? `New resume code for ${res.name}: ${res.code} (copied). The old one no longer works.`
+      : (res.exported ? `Saved ${res.exported} zip${res.exported === 1 ? "" : "s"} to ${res.folder}` : "");
+    if (res.code) navigator.clipboard.writeText(res.code).catch(() => {});
     if (!res.error) cgState = res;
   } catch (e) {
     cgNotice = "Couldn't reach FileDrop.";
@@ -1618,6 +1622,9 @@ cgBody.addEventListener("click", async (e) => {
       if (window.confirm("Stop every workspace and close all rooms? Members keep their saved work.")) cgAct("stop_all");
       break;
     case "stop-member": cgAct("stop_member", { id: d.id }); break;
+    case "new-code":
+      if (window.confirm(`Generate a new resume code for ${d.name}? Their old code stops working. Give the new one only to them.`)) cgAct("reset_code", { id: d.id });
+      break;
     case "remove-member":
       if (window.confirm(`Remove ${d.name} and permanently delete their workspace? Save their zip first if you need it.`)) cgAct("remove_member", { id: d.id });
       break;
