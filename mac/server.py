@@ -1118,6 +1118,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    # This server only listens on loopback, but any web page open in the
+    # browser can still aim requests at it: via DNS rebinding (a wrong Host)
+    # or a plain cross-site request (form post, <img src>). Either could read
+    # the phone's data or fire actions such as opening a CodeGate room.
+    # Legitimate callers (Dromac's own page, the launcher, ble_helper, Rainy
+    # Desktop) all use a loopback Host and are never cross-site.
+    _LOOPBACK_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+    _OWN_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
+    _CROSS_SITE_OK = {"/api/artwork"}  # read-only image, may be embedded elsewhere
+
+    def _request_allowed(self, path):
+        if (self.headers.get("Host") or "").lower() not in self._LOOPBACK_HOSTS:
+            return False
+        if path in self._CROSS_SITE_OK and self.command == "GET":
+            return True
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in self._OWN_ORIGINS:
+            return False
+        return self.headers.get("Sec-Fetch-Site") not in ("cross-site", "same-site")
+
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
@@ -1158,6 +1178,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         p = parsed.path
+        if not self._request_allowed(p):
+            return self._json({"error": "forbidden"}, 403)
 
         if p == "/api/state":
             state = load_state()
@@ -1430,6 +1452,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         p = parsed.path
+        if not self._request_allowed(p):
+            return self._json({"error": "forbidden"}, 403)
         body = self._read_json()
 
         if p == "/internal/ble_hit":
