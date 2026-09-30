@@ -1498,6 +1498,7 @@ function cgRenderManager(st) {
   html += '<div class="cg-sec"><div class="cg-sec-title">ROOMS</div>';
   for (const [kind, room] of Object.entries(st.rooms)) {
     const built = st.images[kind];
+    const live = st.members.some((m) => m.kind === kind && m.running);
     html += `<div class="cg-row"><div><span class="cg-dot ${room.open ? "on" : ""}"></span>${esc(room.label)}
         <div class="dim">${room.members} member${room.members === 1 ? "" : "s"} · up to
         <input class="cg-num" type="number" min="1" max="30" value="${room.maxRunning}" data-act="limit" data-kind="${kind}"> at once</div></div>
@@ -1505,10 +1506,12 @@ function cgRenderManager(st) {
         room.open
           ? `<span class="cg-pin">${esc(cgFmtPin(room.pin))}</span>
              <button class="cg-mini" data-act="copy-pin" data-pin="${esc(room.pin)}">copy</button>
-             <button class="cg-mini warn" data-act="close" data-kind="${kind}">close</button>`
+             <button class="cg-mini" data-act="close" data-kind="${kind}" title="No new joins; current members stay">close</button>
+             <button class="cg-mini warn" data-act="stop-room" data-kind="${kind}" title="Close and shut down every running ${esc(room.label)} workspace">stop</button>`
           : (built === false
               ? `<button class="cg-mini" data-act="build" data-kind="${kind}">${st.building.includes(kind) ? "building…" : "build image"}</button>`
-              : `<button class="cg-mini" data-act="open" data-kind="${kind}">open room</button>`)
+              : `${live ? `<button class="cg-mini warn" data-act="stop-room" data-kind="${kind}">stop</button>` : ""}
+                 <button class="cg-mini" data-act="open" data-kind="${kind}">open room</button>`)
       }</div></div>`;
   }
   html += '<div class="cg-note">A PIN lets a new person join with a name of their choice; closing a room stops new joins but keeps current members. PINs expire after 12 hours.</div></div>';
@@ -1590,7 +1593,8 @@ document.querySelectorAll(".cg-room-btn").forEach((btn) => {
   btn.onclick = () => {
     const kind = btn.dataset.kind;
     const open = cgState && cgState.rooms && cgState.rooms[kind] && cgState.rooms[kind].open;
-    if (open) return cgAct("close", { kind });
+    const live = cgState && cgState.members && cgState.members.some((m) => m.kind === kind && m.running);
+    if (open || live) return cgAct("stop_room", { kind });
     if (window.confirm(CG_OPEN_WARNING(kind))) cgAct("open", { kind });
   };
 });
@@ -1614,6 +1618,7 @@ cgBody.addEventListener("click", async (e) => {
       if (window.confirm(CG_OPEN_WARNING(d.kind))) cgAct("open", { kind: d.kind });
       break;
     case "close": cgAct("close", { kind: d.kind }); break;
+    case "stop-room": cgAct("stop_room", { kind: d.kind }); break;
     case "copy-pin": navigator.clipboard.writeText(d.pin).catch(() => {}); el.textContent = "copied"; break;
     case "build": cgAct("build_image", { kind: d.kind }); break;
     case "internet": cgAct("set_internet", { on: d.on === "1" }); break;
