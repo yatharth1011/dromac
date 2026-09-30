@@ -100,9 +100,11 @@ networks you trust. There's no in-app off switch yet; on shared or public
 Wi-Fi, force-stop the app (Android Settings → Apps → Dromac → Force stop).
 It starts again at the next boot.
 
-The Mac side is local-only: its server binds `127.0.0.1`, and the routes
-that proxy Rainy Desktop's bridge also reject requests whose `Host` header
-isn't loopback, to block DNS rebinding.
+The Mac side is local-only: its server binds `127.0.0.1`, and every request
+must carry a loopback `Host` header (blocking DNS rebinding). Browser requests
+must also come from Dromac's own page, so another website open in your browser
+can't read your phone's data or trigger actions. Local tools (the launcher,
+`ble_helper.py`, Rainy Desktop) are unaffected.
 
 ## Works with Rainy Desktop
 
