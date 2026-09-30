@@ -1293,3 +1293,15 @@ body.theme-glass-fallback {
 .theme-glass-fallback :is(.grid-tile, .btn--ghost, .rate-btn, .notif-action-btn, .notif-dismiss) {
   background: var(--panel);
 }
+
+/* ---------- VS Code (FileDrop card) ---------- */
+
+.code-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.code-start { width: auto; padding: 0 14px; margin-bottom: 0; }
+.code-start:hover { border-color: var(--bad); color: var(--bad); }
+.code-stop { color: var(--bad); }
+.code-running { color: var(--warn); }

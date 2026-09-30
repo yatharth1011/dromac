@@ -1441,6 +1441,88 @@ $("btnFiledropOpen").onclick = () => post("/api/filedrop/open_window");
 checkFiledropStatus();
 setInterval(checkFiledropStatus, 15000);
 
+// ---- CodeGate: VS Code in the browser (served by FileDrop, gated by the Mac password) ----
+
+const codeFolder = $("codeFolder");
+const codeStatusEl = $("codeStatus");
+const codeUrlRow = $("codeUrlRow");
+const codeUrlText = $("codeUrlText");
+const btnCodeStart = $("btnCodeStart");
+const btnCodeStop = $("btnCodeStop");
+const CODE_FOLDER_KEY = "dromac.codeFolder";
+
+try { codeFolder.value = localStorage.getItem(CODE_FOLDER_KEY) || ""; } catch (e) {}
+
+function clockTime(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function renderCode(st) {
+  const running = !!(st && st.running);
+  codeUrlRow.classList.toggle("hidden", !running);
+  btnCodeStop.classList.toggle("hidden", !running);
+  codeStatusEl.classList.toggle("code-running", running);
+  if (running) {
+    codeUrlText.value = st.url;
+    const folderName = (st.folder || "").split("/").filter(Boolean).pop() || st.folder;
+    const stops = st.idleStopsAt
+      ? `stops ${clockTime(st.idleStopsAt)} if no tab reopens`
+      : `open tab connected · stops by ${clockTime(st.stopsAt)} at the latest`;
+    codeStatusEl.textContent = `running on ${folderName} · ${stops}`;
+  } else if (st && st.error) {
+    codeStatusEl.textContent = st.error;
+  } else if (st && st.installed === false) {
+    codeStatusEl.textContent = "code-server isn't installed (brew install code-server)";
+  } else {
+    codeStatusEl.textContent = "not running";
+  }
+}
+
+async function checkCodeStatus() {
+  try { renderCode(await api("/api/code/status")); } catch (e) {}
+}
+
+$("btnCodePick").onclick = async () => {
+  const res = await post("/api/code/pick_folder");
+  if (res && res.folder) {
+    codeFolder.value = res.folder.replace(/\/$/, "") || res.folder;
+  }
+};
+
+btnCodeStart.onclick = async () => {
+  const folder = codeFolder.value.trim();
+  if (!folder) {
+    codeStatusEl.textContent = "pick a folder first";
+    return;
+  }
+  const ok = window.confirm(
+    `⚠️ DANGER: start CodeGate (VS Code) on "${folder}"?\n\n` +
+    "This gives a full terminal on this Mac to anyone on the network who has your Mac password. " +
+    "The folder limit only applies to the editor. The terminal, Python and Jupyter can reach " +
+    "everything your account can.\n\n" +
+    "Only unlock it on devices you trust. Every unlock shows a notification here. " +
+    "It stops 30 min after the last tab closes, and after 8 hours regardless."
+  );
+  if (!ok) return;
+  try { localStorage.setItem(CODE_FOLDER_KEY, folder); } catch (e) {}
+  codeStatusEl.textContent = "starting…";
+  const st = await post("/api/code/start", { folder });
+  renderCode(st);
+  if (st && st.running && st.url) {
+    navigator.clipboard.writeText(st.url).catch(() => {});
+    codeStatusEl.textContent += " · URL copied";
+  }
+};
+
+btnCodeStop.onclick = async () => renderCode(await post("/api/code/stop"));
+
+$("btnCodeCopy").onclick = () => {
+  if (codeUrlText.value) navigator.clipboard.writeText(codeUrlText.value).catch(() => {});
+};
+
+checkCodeStatus();
+setInterval(checkCodeStatus, 15000);
+
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }

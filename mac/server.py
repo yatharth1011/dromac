@@ -131,6 +131,39 @@ def open_filedrop_window(url):
     threading.Timer(0.8, _focus_filedrop_window).start()
 
 
+def filedrop_code_request(method, path, body=None, timeout=10):
+    """FileDrop's CodeGate (VS Code) controls only answer loopback requests carrying
+    X-FileDrop-Local (so a web page can't drive them) -- Dromac is that
+    trusted local caller."""
+    data = json.dumps(body or {}).encode() if method == "POST" else None
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{FILEDROP_PORT}{path}", data=data, method=method,
+        headers={"X-FileDrop-Local": "1", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read())
+        except Exception:
+            return {"error": f"FileDrop returned {e.code}"}
+    except Exception:
+        return {"running": False, "filedropRunning": False}
+
+
+def pick_folder():
+    """Native macOS folder picker; None if cancelled."""
+    try:
+        out = subprocess.run(
+            ["osascript", "-e", 'POSIX path of (choose folder with prompt "Folder to open in CodeGate")'],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    return out.stdout.strip() or None
+
+
 # Liquid-glass theme: the dashboard renders Rainy Desktop's rain shader over
 # the desktop picture. Rainy serves its live settings/clock/wallpaper on a
 # loopback bridge that deliberately sends no CORS headers (so web pages can't
@@ -1270,6 +1303,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/filedrop/status":
             return self._json(filedrop_status())
 
+        if p == "/api/code/status":
+            return self._json(filedrop_code_request("GET", "/api/code/status"))
+
         if p in ("/api/rainy/state", "/api/rainy/wallpaper"):
             # Rainy's bridge only answers requests whose Host is loopback
             # (a DNS-rebinding guard); proxying it must not become a way
@@ -1597,6 +1633,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/filedrop/start":
             return self._json(start_filedrop())
+
+        if p == "/api/code/start":
+            status = start_filedrop()
+            if not status["running"]:
+                return self._json({"error": status.get("error", "FileDrop did not start")}, 502)
+            return self._json(filedrop_code_request("POST", "/api/code/start", {"folder": body.get("folder", "")}, timeout=60))
+
+        if p == "/api/code/stop":
+            return self._json(filedrop_code_request("POST", "/api/code/stop"))
+
+        if p == "/api/code/pick_folder":
+            return self._json({"folder": pick_folder()})
 
         if p == "/api/filedrop/open_window":
             status = start_filedrop()
