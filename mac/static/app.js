@@ -1497,9 +1497,10 @@ btnCodeStart.onclick = async () => {
   }
   const ok = window.confirm(
     `⚠️ DANGER: start CodeGate (VS Code) on "${folder}"?\n\n` +
-    "This gives a full terminal on this Mac to anyone on the network who has your Mac password. " +
-    "The folder limit only applies to the editor. The terminal, Python and Jupyter can reach " +
-    "everything your account can.\n\n" +
+    "Anyone who unlocks it (Touch ID on this Mac, or your Mac password) gets VS Code with a " +
+    "terminal, Python and Jupyter that can run code, and change or delete anything in this folder.\n\n" +
+    "A macOS sandbox keeps all of it inside this folder: no access to your other files, " +
+    "SSH keys, keychain or other apps.\n\n" +
     "Only unlock it on devices you trust. Every unlock shows a notification here. " +
     "It stops 30 min after the last tab closes, and after 8 hours regardless."
   );

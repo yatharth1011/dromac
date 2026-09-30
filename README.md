@@ -135,8 +135,9 @@ the card just reports that FileDrop isn't installed.
 
 The card also starts **CodeGate**, FileDrop's VS Code in the browser, on a folder you
 pick (type a path or use the ⋯ picker). It shows a danger warning first,
-because that window includes a terminal on your Mac, unlocked with your Mac
-password. Then it copies the URL. The card shows when it will auto-stop,
+because that window includes a terminal that can run code and change anything in
+that folder (sandboxed to it, and unlocked with Touch ID or your Mac password).
+Then it copies the URL. The card shows when it will auto-stop,
 and has a stop button. See FileDrop's README for the security model.
 
 ## License
