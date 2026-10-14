@@ -15,6 +15,29 @@ a car, rain alone...). Each kept event is then
   - trimmed (max 15 s), faded, and levelled to the same loudest moment.
 
 Run with the Python that runs Dromac (it has torch and transformers).
+
+The recordings (download each into models/thunder_src as t00, t01, ...;
+Commons serves an MP3 of each Ogg, which macOS can read):
+  t00: "Booming Thunder 2023-10-09 2-07-34 am.ogg" by KTerPalmers (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Booming_Thunder_2023-10-09_2-07-34_am.ogg
+  t01: "Lightning Recorded In Groningen 2018-05-13 01.wav" by A. Whyborn (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Lightning_Recorded_In_Groningen_2018-05-13_01.wav
+  t02: "Medium shower accompanied by thunders.ogg" by CutSomeSlackenstein (CC BY 4.0)
+        https://commons.wikimedia.org/wiki/File:Medium_shower_accompanied_by_thunders.ogg
+  t03: "Rhumphries - rbh-thunder-storm.ogg" by RHumphries (CC BY 3.0)
+        https://commons.wikimedia.org/wiki/File:Rhumphries_-_rbh-thunder-storm.ogg
+  t04: "Thunder.ogg" by Bidgee (CC BY 3.0)
+        https://commons.wikimedia.org/wiki/File:Thunder.ogg
+  t05: "Thunder.wav" by Subhashish Panigrahi (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Thunder.wav
+  t06: "Thunder 01.ogg" by Amuzujoe (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Thunder_01.ogg
+  t07: "Thunder Claps.ogg" by Jonathan Hunt (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Thunder_Claps.ogg
+  t08: "Thunder crack 2B.wav" by Jud McCranie (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Thunder_crack_2B.wav
+  t09: "Very close thunder cracks.flac" by Delorean76 (CC BY-SA 3.0)
+        https://commons.wikimedia.org/wiki/File:Very_close_thunder_cracks.flac
 """
 import json
 import sys
