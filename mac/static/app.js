@@ -251,9 +251,18 @@ function post(path, body) {
   });
 }
 
+// How the Mac is reaching the phone, in priority order (the server moves up
+// to a better one on its own the moment it's available).
 const METHOD_LABELS = {
-  ble: "Bluetooth", mdns: "mDNS", "ip-ring": "network search",
-  gateway: "gateway", manual: "manual",
+  usb: ["USB cable", "best path"],
+  ble: ["Wi-Fi", "address from the Bluetooth beacon"],
+  wifi: ["Wi-Fi", "the phone's remembered address"],
+  gateway: ["Wi-Fi", "phone's hotspot"],
+  mdns: ["Wi-Fi", "found by mDNS"],
+  bluetooth: ["Bluetooth data link", "fallback · slower"],
+  scan: ["Wi-Fi", "found by network search"],
+  "ip-ring": ["Wi-Fi", "found by network search"],
+  manual: ["Wi-Fi", "linked manually"],
 };
 
 function esc(s) {
@@ -267,11 +276,15 @@ function renderState(state) {
     connPill.classList.add("pill-on");
     connPill.classList.remove("pill-off");
     connText.textContent = state.device_model ? `Connected · ${state.device_model}` : "Connected";
-    const via = METHOD_LABELS[state.method];
-    connDetail.innerHTML = state.host
-      ? `Linked to <span class="tok-number">${esc(state.host)}:${esc(String(state.port))}</span>` +
-        (via ? ` · <span class="tok-keyword">via ${esc(via)}</span>` : "")
-      : "Connected.";
+    const [via, note] = METHOD_LABELS[state.method] || [null, null];
+    const local = !state.host || String(state.host).startsWith("127.");
+    connDetail.innerHTML = via
+      ? `Linked via <span class="tok-keyword">${esc(via)}</span>` +
+        (local ? "" : ` <span class="tok-number">${esc(state.host)}</span>`) +
+        (note ? ` <span class="tok-comment">· ${esc(note)}</span>` : "")
+      : state.host
+        ? `Linked to <span class="tok-number">${esc(state.host)}:${esc(String(state.port))}</span>`
+        : "Connected.";
   } else {
     connPill.classList.remove("pill-on");
     connPill.classList.add("pill-off");
@@ -298,15 +311,22 @@ function renderState(state) {
     }
   }
 
-  const np = state.now_playing;
+  // In "ai split" you hear the song ~9.5 s after the phone plays it. Show what
+  // you're hearing: the now-playing report from that long ago (title, art,
+  // lyrics, progress), so a new song only appears when it reaches your ears.
+  const heardDelay = (state.audio && state.audio.on && state.audio.pos && state.audio.pos.delay_ms) || 0;
+  const np = heardNowPlaying(state.now_playing, heardDelay);
   if (np) {
     trackTitle.textContent = np.title || "Unknown title";
     trackArtist.textContent = np.artist || "";
     iconPlay.style.display = np.playing ? "none" : "block";
     iconPause.style.display = np.playing ? "block" : "none";
-    if (np.artwork && np.artwork !== lastArtwork) {
+    // with the audio running behind, refresh the cover only when the track you
+    // hear changes (the phone's current cover would be the next song's)
+    const artKey = heardDelay ? `${np.title || ""}::${np.artist || ""}` : np.artwork;
+    if (np.artwork && artKey !== lastArtwork) {
       artImg.src = np.artwork;
-      lastArtwork = np.artwork;
+      lastArtwork = artKey;
     }
     const glowKey = `${np.title || ""}::${np.artist || ""}`;
     if (np.artwork && glowKey !== lastGlowKey) {
@@ -347,7 +367,7 @@ function renderState(state) {
 
     if (np.duration && np.duration > 0) {
       seekRow.classList.remove("hidden");
-      seekState = { position: np.position || 0, duration: np.duration, playing: !!np.playing, syncedAt: Date.now() };
+      seekState = { position: np.heardPosition ?? (np.position || 0), duration: np.duration, playing: !!np.playing, syncedAt: Date.now() };
       if (!userDraggingSeek) applySeekDisplay(seekState.position);
     } else {
       seekRow.classList.add("hidden");
@@ -440,6 +460,7 @@ function renderState(state) {
   lastKnownOverlayGranted = state.overlayGranted !== false;
 
   btnKeepAwake.classList.toggle("btn--active", !!state.keepAwake);
+  renderSpeaker(state.audio);
   lockRow.classList.toggle("hidden", !state.lockAvailable);
 
   if (state.incomingCall) {
@@ -680,6 +701,23 @@ function applySeekDisplay(posMs) {
   updateFillVisual(seekSlider);
   seekPos.textContent = formatTime(posMs);
   seekDur.textContent = formatTime(seekState.duration > 0 ? seekState.duration : 0);
+}
+
+// Recent now-playing reports, for showing what you're hearing when the audio
+// runs behind the phone (see renderState).
+const npHistory = [];
+function heardNowPlaying(np, delayMs) {
+  const now = Date.now();
+  npHistory.push({ t: now, np });
+  while (npHistory.length && npHistory[0].t < now - delayMs - 30000) npHistory.shift();
+  if (!delayMs) return np;
+  // the newest report that's at least delayMs old (else the oldest we have)
+  let pick = npHistory[0];
+  for (const h of npHistory) if (h.t <= now - delayMs) pick = h;
+  if (!pick.np) return null;
+  // its position then, carried forward to the moment you're hearing now
+  const ahead = pick.np.playing ? Math.max(0, now - delayMs - pick.t) : 0;
+  return { ...pick.np, heardPosition: Math.min(pick.np.duration || Infinity, (pick.np.position || 0) + ahead) };
 }
 
 // Ticks locally between polls so the bar visibly advances in real time
@@ -1134,6 +1172,745 @@ async function startMirror() {
 }
 
 $("btnMirror").onclick = startMirror;
+
+// ---------- phone audio on the Mac speakers ----------
+// Lossless over USB / Wi-Fi, compressed over the Bluetooth link; the server
+// follows whichever link is up. The tile lights up while it's on.
+const btnSpeaker = $("btnSpeaker");
+let speakerOn = false;
+let lastSpeakerError = null;
+const speakerLabel = btnSpeaker.querySelector(".grid-tile-label");
+function renderSpeaker(audio) {
+  if (!audio) return;
+  speakerOn = !!audio.on;
+  btnSpeaker.classList.toggle("btn--active", speakerOn);
+  // The tile names the path audio is taking right now (USB, else Wi-Fi).
+  speakerLabel.textContent = speakerOn ? (audio.route ? `audio link · ${audio.route}` : audio.waiting ? "audio link · waiting" : "audio link · …") : "audio link";
+  btnSpeaker.title = speakerOn
+    ? (audio.route
+        ? `phone audio playing here over ${audio.route} (${audio.codec === "raw" ? "lossless PCM" : "lossless FLAC"}) — click to stop`
+        : "phone audio: waiting for USB or Wi-Fi — click to stop")
+    : "audio link is off: everything plays normally. Click to play the phone's audio on this Mac";
+  if (audio.error && audio.error !== lastSpeakerError && !audio.error.startsWith("waiting")) showToast(audio.error, "error");
+  lastSpeakerError = audio.error;
+  if (audio.fx) renderFx(audio.fx);
+  if (audio.pos) syncFxPosition(audio.pos);
+  renderLock(audio);
+}
+// ---------- audio effects (8D, slowed + reverb) ----------
+// Two switches (8D, slowed + reverb), 8D's speed and path, and a live 3D view.
+// The path formulas mirror dromac_fx.py exactly; the view re-syncs to the
+// effects process's reported position, so the dot is where you hear it.
+const fxPanel = document.querySelector(".fx-panel");
+const fx8dButtons = [...document.querySelectorAll("#fx8d .fx-preset")];
+const btn8d = $("btn8d");
+const btnSlowed = $("btnSlowed");
+const fxSpeedEl = $("fxSpeed");
+const SPEED_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+let fxState = { "8d_on": false, "8d": "orbit", speed: 1, slowed: false, mode: "8d", vocals: true, accel: 50 };
+// ---------- the mixer: which instruments you hear ----------
+const HEAR_PARTS = ["vocals", "drums", "bass", "other"];
+const hearRow = $("hearRow");
+const hearChips = [...hearRow.querySelectorAll(".hear-chip")];
+const hearAll = $("hearAll");
+function hearing() {
+  const h = { vocals: fxState.vocals ?? true, ...(fxState.hear || {}) };
+  return Object.fromEntries(HEAR_PARTS.map((p) => [p, h[p] ?? true]));
+}
+function setHear(h) {
+  fxState.hear = h; fxState.vocals = h.vocals;
+  renderHear();
+  sendFx({ hear: h });
+}
+// click: that one on/off (never all off -- that's just silence); double-click:
+// only that one (again: everything back)
+let hearClickTimer = null;
+hearChips.forEach((chip) => {
+  const part = chip.dataset.part;
+  chip.onclick = () => {
+    clearTimeout(hearClickTimer);
+    hearClickTimer = setTimeout(() => {
+      const h = hearing();
+      h[part] = !h[part];
+      if (!Object.values(h).some(Boolean)) return;
+      setHear(h);
+    }, 230);
+  };
+  chip.ondblclick = () => {
+    clearTimeout(hearClickTimer);
+    const h = hearing();
+    const solo = HEAR_PARTS.every((p) => h[p] === (p === part));
+    setHear(Object.fromEntries(HEAR_PARTS.map((p) => [p, solo || p === part])));
+  };
+});
+hearAll.onclick = () => setHear(Object.fromEntries(HEAR_PARTS.map((p) => [p, true])));
+function renderHear() {
+  const h = hearing();
+  hearChips.forEach((chip) => chip.classList.toggle("on", h[chip.dataset.part]));
+  hearAll.classList.toggle("show", !Object.values(h).every(Boolean));
+  const splitOn = fxState.mode === "dsp" || fxState.mode === "ai";
+  hearRow.classList.toggle("nosplit", !splitOn);
+  hearRow.title = splitOn ? "" : "no split: you hear the whole song -- leaving an instrument out picks ai split";
+}
+// ---------- head tracking (the Mac's camera) ----------
+const btnHead = $("btnHead");
+const btnRecenter = $("btnRecenter");
+const headInfo = $("headInfo");
+btnHead.onclick = () => sendFx({ head: !fxState.head });
+btnRecenter.onclick = () => sendFx({ recenter: true });
+function renderHead() {
+  btnHead.classList.toggle("on", !!fxState.head);
+  btnRecenter.classList.toggle("show", !!fxState.head);
+  const h = fxSync && fxSync.head;
+  headInfo.classList.toggle("waiting", !!(fxState.head && h && (h.error || !h.face)));
+  headInfo.textContent = !fxState.head ? "" : !h || !h.on ? (h && h.error ? h.error : "starting the camera…") :
+    h.face ? `· ${Math.round(h.yaw * 180 / Math.PI)}°` : "· can't see your face";
+}
+const btnKitTight = $("btnKitTight");
+const btnKitBoost = $("btnKitBoost");
+btnKitTight.onclick = () => sendFx({ kit_tight: !(fxState.kit_tight ?? true) });
+btnKitBoost.onclick = () => sendFx({ kit_boost: !(fxState.kit_boost ?? true) });
+const btnSelfMix = $("btnSelfMix");
+btnSelfMix.onclick = () => sendFx({ self_mix: !(fxState.self_mix ?? true) });
+const btnKit = $("btnKit");
+btnKit.onclick = () => sendFx({ kit: !fxState.kit });
+const btnRoom = $("btnRoom");
+btnRoom.onclick = () => sendFx({ room: !(fxState.room ?? true) });
+const fxModeButtons = [...document.querySelectorAll("#fxMode .fx-mode-btn")];
+fxModeButtons.forEach((b) => { b.onclick = () => sendFx({ mode: b.dataset.mode }); });
+const MODE_INFO = {
+  "8d": "the whole song travels the path",
+  none: "",
+  dsp: "vocals · drums · bass · the rest, each in its own place — live",
+  ai: "AI-separated instruments, studio quality — plays a few seconds behind",
+};
+const AI_STATE = { loading: "loading the AI model…", separating: "separating — music starts in a few seconds", playing: "playing behind the phone" };
+let heardDelayMs = 0;
+let aiState = null;
+
+function renderFx(fx) {
+  if (!fx) return;
+  fxState = { ...fxState, ...fx };
+  btn8d.classList.toggle("on", !!fxState["8d_on"]);
+  btnSlowed.classList.toggle("on", !!fxState.slowed);
+  fxPanel.classList.toggle("off", !fxState["8d_on"]);
+  fx8dButtons.forEach((b) => b.classList.toggle("on", b.dataset.fx8d === fxState["8d"]));
+  fxModeButtons.forEach((b) => b.classList.toggle("on", b.dataset.mode === (fxState.mode || "8d")));
+  // vocals and the split work with or without 8D (vocals off picks ai split)
+  const splitOn = fxState.mode === "dsp" || fxState.mode === "ai";
+  renderHear();
+  renderHead();
+  renderRain();
+  btnRoom.classList.toggle("on", fxState.room ?? true);
+  btnKit.classList.toggle("on", !!fxState.kit);
+  btnSelfMix.classList.toggle("on", fxState.self_mix ?? true);
+  btnSelfMix.style.display = fxState["8d"] === "auto" && fxState["8d_on"] ? "" : "none";
+  $("kitOpts").classList.toggle("hidden", !(fxState.kit && fxState.mode === "ai"));
+  btnKitTight.classList.toggle("on", fxState.kit_tight ?? true);
+  btnKitBoost.classList.toggle("on", fxState.kit_boost ?? true);
+  btnKit.classList.toggle("disabled", fxState.mode !== "ai");
+  btnRoom.classList.toggle("disabled", !fxState["8d_on"] || fxState["8d"] === "still");
+  renderAccel();
+  if (document.activeElement !== bassSlider) bassSlider.value = fxState.bass ?? 0;
+  showBass(Number(bassSlider.value));
+  const mode = fxState.mode || "8d";
+  $("fxModeInfo").textContent = !(fxState["8d_on"] || splitOn) ? "" : (mode === "ai" && aiState
+    ? (aiState === "playing" && heardDelayMs ? `playing ${(heardDelayMs / 1000).toFixed(1)} s behind the phone` : AI_STATE[aiState])
+    : MODE_INFO[mode]);
+  fxSpeedEl.textContent = `${fxState.speed}×`;
+  // the live view has its own pane; dimmed while 8D is off
+  $("fxViewWrap").classList.toggle("off", !fxState["8d_on"]);
+  if (fxState["8d"] === "auto" && fxState["8d_on"]) pollAutoPositions();
+  const label = (fx8dButtons.find((b) => b.dataset.fx8d === fxState["8d"]) || {}).title || "";
+  setCaption(`8d · ${fxState["8d"]} · ${fxState.speed}×${label ? " — " + label : ""}`);
+}
+async function sendFx(change) {
+  renderFx({ ...fxState, ...change, ...(change["8d"] ? { "8d_on": true } : {}) }); // instant; server confirms
+  const res = await post("/api/audio/fx", change);
+  if (res && res.audio) { renderFx(res.audio.fx); renderSpeaker(res.audio); }
+}
+fx8dButtons.forEach((b) => { b.onclick = () => sendFx({ "8d": b.dataset.fx8d }); });
+btn8d.onclick = () => sendFx({ "8d_on": !fxState["8d_on"] });
+btnSlowed.onclick = () => sendFx({ slowed: !fxState.slowed });
+function stepSpeed(dir) {
+  const i = SPEED_STEPS.findIndex((v) => v >= fxState.speed - 1e-6);
+  const next = SPEED_STEPS[Math.min(SPEED_STEPS.length - 1, Math.max(0, (i < 0 ? 3 : i) + dir))];
+  sendFx({ speed: next });
+}
+$("fxSlower").onclick = () => stepSpeed(-1);
+$("fxFaster").onclick = () => stepSpeed(1);
+
+// ---------- ai acceleration (GPU share -> how far behind ai split plays) ----------
+const accelRow = $("accelRow");
+const accelSlider = $("accelSlider");
+const accelInfo = $("accelInfo");
+let accelSending = null;
+let aiTargetMs = null;
+function renderAccel() {
+  accelRow.classList.toggle("hidden", fxState.mode !== "ai");
+  const v = Number(fxState.accel ?? 50);
+  if (document.activeElement !== accelSlider) accelSlider.value = Math.min(80, v);
+  showAccelInfo(Number(accelSlider.value));
+}
+function showAccelInfo(v) {
+  const ultra = v >= 80;
+  accelRow.classList.toggle("ultra", ultra);
+  // the delay the AI is actually aiming for, once it reports one; else an estimate
+  const est = aiTargetMs != null && Number(fxState.accel ?? 50) === v ? aiTargetMs / 1000 : (0.5 / (v / 100)) + 1 + 0.85;
+  const behind = `~${est.toFixed(1)} s behind`;
+  if (ultra) {
+    accelInfo.innerHTML = '<span class="ultramuse">' + [..."ultramuse"].map((ch, i) =>
+      `<span style="animation-delay:${-i * 0.12}s,${-i * 0.1}s">${ch}</span>`).join("") + "</span>";
+    accelInfo.title = `80% GPU · ${behind}`;
+  } else {
+    accelInfo.textContent = `${v}% gpu · ${behind}`;
+    accelInfo.title = "";
+  }
+}
+accelSlider.oninput = () => {
+  const v = Number(accelSlider.value);
+  showAccelInfo(v);
+  clearTimeout(accelSending);
+  accelSending = setTimeout(() => sendFx({ accel: v }), 150);
+};
+// The 3D view's caption: one line (the full text on hover), and only touched
+// when it actually changes -- not 40 times a second
+function setCaption(text) {
+  const el = $("fxViewCaption");
+  if (el.textContent !== text) { el.textContent = text; el.title = text; }
+}
+
+// ---------- ambience: rain and thunder ----------
+// lightning: while rain's on, a light check 4x a second for a new strike; the
+// 3D view flashes the moment one's seen (its thunder is still seconds away)
+let flashStart = null, lastStrike = 0;
+setInterval(async () => {
+  const r = fxState.rain || {};
+  if (!r.on || r.paused || document.hidden) return;
+  try {
+    const pos = await (await fetch("/api/audio/pos")).json();
+    if (pos.flash_ago == null) return;
+    const strike = pos.t - pos.flash_ago;
+    if (strike > lastStrike + 1 && Date.now() / 1000 - strike < 3) flashStart = performance.now();
+    lastStrike = Math.max(lastStrike, strike);
+  } catch (e) {}
+}, 250);
+const btnRain = $("btnRain");
+const rainVolume = $("rainVolume");
+const rainVolumeInfo = $("rainVolumeInfo");
+const rainPreset = $("rainPreset");
+let rainSending = null;
+const thunderLevel = $("thunderLevel");
+const thunderLevelInfo = $("thunderLevelInfo");
+let thunderSending = null;
+const dbText = (v) => (v > 0 ? `+${v}` : `${v}`) + " dB";
+function rainState() { return { on: false, preset: "storm cycle", volume: 35, thunder: 0, ...(fxState.rain || {}) }; }
+function renderRain() {
+  const r = rainState();
+  btnRain.classList.toggle("on", !!r.on && !r.paused);
+  btnRain.classList.toggle("paused", !!r.on && !!r.paused);
+  btnRain.title = r.on && r.paused ? "rain paused (play/pause brings it back, then the music)" : "rain and thunder, made live -- it never repeats";
+  document.querySelector(".ambience-card").classList.toggle("off", !r.on);
+  if (document.activeElement !== rainVolume) rainVolume.value = r.volume;
+  rainVolumeInfo.textContent = `${rainVolume.value}%`;
+  if (document.activeElement !== thunderLevel) thunderLevel.value = r.thunder;
+  thunderLevelInfo.textContent = dbText(Number(thunderLevel.value));
+  if (document.activeElement !== rainPreset) rainPreset.value = r.preset;
+}
+function sendRain(change) {
+  fxState.rain = { ...rainState(), ...change };
+  renderRain();
+  sendFx({ rain: change });
+}
+btnRain.onclick = () => sendRain({ on: !rainState().on });
+rainPreset.onchange = () => sendRain({ preset: rainPreset.value, on: true });
+thunderLevel.oninput = () => {
+  thunderLevelInfo.textContent = dbText(Number(thunderLevel.value));
+  clearTimeout(thunderSending);
+  thunderSending = setTimeout(() => sendRain({ thunder: Number(thunderLevel.value) }), 120);
+};
+rainVolume.oninput = () => {
+  rainVolumeInfo.textContent = `${rainVolume.value}%`;
+  clearTimeout(rainSending);
+  rainSending = setTimeout(() => sendRain({ volume: Number(rainVolume.value) }), 120);
+};
+
+// ---------- bass boost (0 to +12 dB under 100 Hz) ----------
+const bassSlider = $("bassSlider");
+const bassInfo = $("bassInfo");
+let bassSending = null;
+function showBass(v) { bassInfo.textContent = v ? `+${v} dB` : "off"; }
+bassSlider.oninput = () => {
+  const v = Number(bassSlider.value);
+  showBass(v);
+  clearTimeout(bassSending);
+  bassSending = setTimeout(() => sendFx({ bass: v }), 120);
+};
+
+// x = right, y = in front, z = up (same as dromac_fx.py)
+const LAP_SECONDS = 8;
+const FX_PATHS = {
+  orbit: (u) => [Math.sin(u), Math.cos(u), 0],
+  helix: (u) => [Math.sin(u), Math.cos(u), 0.85 * Math.sin(u / 4)],
+  loop: (u) => [Math.sin(u), 0.2, Math.cos(u)],
+  infinity: (u) => [1.1 * Math.sin(u), 0.8 * Math.sin(2 * u), 0.75 * Math.cos(u) ** 2],
+  saddle: (u) => [Math.sin(u), Math.cos(u), 0.65 * Math.cos(2 * u)],
+  knot: (u) => [0.45 * (Math.sin(u) + 2 * Math.sin(2 * u)), 0.45 * (Math.cos(u) - 2 * Math.cos(2 * u)), -0.55 * Math.sin(3 * u)],
+  lissajous: (u) => { const v = u / 3; return [1.2 * Math.cos(3 * v + 0.3), 1.2 * Math.cos(2 * v + 1.1), 0.7 * Math.cos(5 * v + 2.0)]; },
+  breathe: (u) => { const r = 0.45 + 1.6 * (1 - Math.cos(u / 3)) / 2; return [r * Math.sin(u), r * Math.cos(u), 0.25 * Math.sin(u / 2)]; },
+  gyro: (u) => {
+    const t = 55 * Math.PI / 180, x0 = Math.cos(u), y0 = Math.sin(u) * Math.cos(t), z0 = Math.sin(u) * Math.sin(t), p = u * 0.17;
+    return [x0 * Math.cos(p) - y0 * Math.sin(p), x0 * Math.sin(p) + y0 * Math.cos(p), z0];
+  },
+  swing: (u) => { const a = (Math.PI / 2) * Math.sin(u); return [Math.sin(a), Math.cos(a), 0.1 * Math.sin(2 * u)]; },
+  // near & far
+  comet: (u) => {
+    const e = 0.9, a = 3.2, M = ((u % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    let E = M + e * Math.sin(M);
+    for (let k = 0; k < 8; k++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+    const px = a * (Math.cos(E) - e), py = a * Math.sqrt(1 - e * e) * Math.sin(E), t = 25 * Math.PI / 180;
+    return [py, -px * Math.cos(t), px * Math.sin(t)];
+  },
+  golden: (u) => {
+    const PHI = (1 + Math.sqrt(5)) / 2, lo = Math.log(0.2), hi = Math.log(6);
+    const lr = lo + (hi - lo) * (1 - Math.cos(u / 4)) / 2, th = (lr - lo) / (Math.log(PHI) / (Math.PI / 2)), r = Math.exp(lr);
+    return [r * Math.sin(th), r * Math.cos(th), 0.15 * r * Math.sin(u / 3)];
+  },
+  rose: (u) => { const th = u / 2, r = 0.22 + 3.4 * Math.abs(Math.cos(2.5 * th)); return [r * Math.sin(th), r * Math.cos(th), 0.5 * Math.sin(3 * th)]; },
+  torus: (u) => { const ph = u / 3, w = 2.3 + 2.0 * Math.cos(7 * ph); return [w * Math.cos(2 * ph), w * Math.sin(2 * ph), 0.9 * Math.sin(7 * ph)]; },
+  spiro: (u) => {
+    const R = 5, r = 3, d = 2.2, k = 0.85, th = u * 1.5;
+    return [k * ((R - r) * Math.cos(th) + d * Math.cos((R - r) / r * th)), k * ((R - r) * Math.sin(th) - d * Math.sin((R - r) / r * th)), 0.3 * Math.sin(u / 2)];
+  },
+  pendulum: (u) => { const s = 3 * Math.cos(u), p = 0.12 * u; return [s * Math.cos(p), s * Math.sin(p), 0.35 - 0.05 * s * s]; },
+  zoom: (u) => {
+    const r = 0.15 + 5.5 * (1 + Math.cos(u)) / 2;
+    const az = Math.PI / 2 * Math.sign(Math.sin(u / 2) + 1e-9) * (0.85 + 0.15 * Math.cos(u / 3));
+    return [r * Math.sin(az), r * Math.cos(az) * 0.4, 0.2 * Math.sin(u / 5)];
+  },
+  tide: (u) => { const PHI = (1 + Math.sqrt(5)) / 2, r = 0.3 + 4.7 * (1 - Math.cos(u / (PHI * PHI))) / 2; return [r * Math.sin(u), r * Math.cos(u), 0.6 * Math.sin(u / PHI)]; },
+  loxodrome: (u) => {
+    const lat = 78 * Math.PI / 180 * Math.cos(u / 6), lon = 3 * Math.log(Math.tan(Math.PI / 4 + lat / 2)), r = 1.6 + 1.2 * Math.sin(u / 5);
+    return [r * Math.cos(lat) * Math.sin(lon), r * Math.cos(lat) * Math.cos(lon), r * Math.sin(lat)];
+  },
+  stage: () => [0, 1.5, 0],
+  still: () => [0, 1.0, 0],
+  wander: (u) => [
+    Math.sin(u * 0.83 + 1.3) * 0.7 + Math.sin(u * 0.31 + 0.2) * 0.6,
+    Math.sin(u * 0.57 + 2.1) * 0.8 + Math.cos(u * 0.23) * 0.5,
+    Math.sin(u * 0.41 + 0.7) * 0.6,
+  ],
+};
+// phase span of one full figure (for drawing the whole curve faintly)
+const FX_PERIOD = { helix: 8 * Math.PI, lissajous: 6 * Math.PI, breathe: 12 * Math.PI, golden: 8 * Math.PI,
+  rose: 4 * Math.PI, torus: 6 * Math.PI, spiro: 4 * Math.PI, pendulum: 2 * Math.PI / 0.12, zoom: 12 * Math.PI, loxodrome: 60 * Math.PI };
+const FX_OPEN = new Set(["gyro", "wander", "tide", "loxodrome"]);
+
+// "auto": the conductor decides the positions, so the view draws the real ones
+// (fetched ~6x a second) and glides between them
+let autoPos = null, autoShown = null, autoInfo = null, autoPolling = false;
+async function pollAutoPositions() {
+  if (autoPolling) return;
+  autoPolling = true;
+  while (fxState["8d"] === "auto" && fxState["8d_on"]) {
+    try {
+      const r = await fetch("/api/audio/pos");
+      const pos = await r.json();
+      if (pos.positions && pos.positions.length) autoPos = pos.positions;
+      if (pos.auto) autoInfo = pos.auto;
+    } catch (e) {}
+    await new Promise((res) => setTimeout(res, 160));
+  }
+  autoPolling = false;
+} // never close: no "whole figure" to draw
+
+const fxView = $("fxView");
+const fxCtx = fxView.getContext("2d");
+let shownHeadYaw = 0;
+let fxPhase = 0, fxLastFrame = performance.now(), fxSync = null, fxPhaseRef = null;
+let lorenzState = [1, 1, 20], rosslerState = [1, 1, 0];
+const lorenzTrail = [];
+function rosslerStep(dt) {
+  const d = (s) => [-s[1] - s[2], s[0] + 0.2 * s[1], 0.2 + s[2] * (s[0] - 5.7)];
+  const h = dt / 4;
+  for (let k = 0; k < 4; k++) {
+    const s = rosslerState, k1 = d(s);
+    const k2 = d(s.map((v, i) => v + h / 2 * k1[i]));
+    const k3 = d(s.map((v, i) => v + h / 2 * k2[i]));
+    const k4 = d(s.map((v, i) => v + h * k3[i]));
+    rosslerState = s.map((v, i) => v + h / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+  }
+  const [x, y, z] = rosslerState;
+  return [x / 2.6, y / 2.6, z / 7 - 0.6];
+}
+function lorenzStep(dt) {
+  const d = (s) => [10 * (s[1] - s[0]), s[0] * (28 - s[2]) - s[1], s[0] * s[1] - (8 / 3) * s[2]];
+  const h = dt / 4;
+  for (let k = 0; k < 4; k++) {
+    const s = lorenzState, k1 = d(s);
+    const k2 = d(s.map((v, i) => v + h / 2 * k1[i]));
+    const k3 = d(s.map((v, i) => v + h / 2 * k2[i]));
+    const k4 = d(s.map((v, i) => v + h * k3[i]));
+    lorenzState = s.map((v, i) => v + h / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+  }
+  const [x, y, z] = lorenzState;
+  return [x / 15, (z - 25) / 13, y / 20];
+}
+// Each instrument's own way along the path (same as STEM_SPEED/STEM_PHASE in
+// dromac_fx.py): its own speed and starting point; for the attractors, its own
+// chaotic system, synced from the effects process's report.
+// (then, with the drum kit split: snare, toms, hihat, cymbals)
+const STEM_SPEED = [1.0, 1.17, 0.83, 1.29, 1.29, 1.41, 0.71, 1.53, 0.91];
+const STEM_PHASE = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2, 3 * Math.PI / 2 + Math.PI,
+  Math.PI / 4, 5 * Math.PI / 4, 3 * Math.PI / 4, 7 * Math.PI / 4];
+// every instrument's dot colour; the kit in warm shades of the drums' orange
+const STEM_COLORS = { drums: "#ffb347", bass: "#5ab0ff", other: "#c58bff", "other ": "#c58bff",
+  kick: "#ff8c42", snare: "#ffd166", toms: "#f4a261", hihat: "#fff3b0", cymbals: "#ffe08a" };
+// The split kit stays one kit (same as kit_around in dromac_fx.py): its pieces
+// around the drums' spot, offsets (right, away, up) in metres at 1.5 m.
+const KIT_OFFSETS = { kick: [0, 0, -0.3], snare: [-0.3, -0.2, 0], toms: [0.35, 0.05, 0.1], hihat: [-0.5, -0.05, 0.25], cymbals: [0.2, 0.15, 0.5] };
+function kitAround([cx, cy, cz], piece) {
+  const h = Math.hypot(cx, cy);
+  const [fx, fy] = h > 0.05 ? [cx / h, cy / h] : [0, 1];
+  const [rx, ry] = [fy, -fx];
+  const scale = Math.min(2, Math.max(0.6, Math.hypot(cx, cy, cz) / 1.5));
+  const [dr, dd, du] = KIT_OFFSETS[piece];
+  return [cx + (rx * dr + fx * dd) * scale, cy + (ry * dr + fy * dd) * scale, cz + du * scale];
+}
+// the names the effects process reports ("other_l"...) -> the labels shown
+const stemLabel = (n) => n === "other_l" ? "other" : n === "other_r" ? "other " : n;
+let stemStates = { lorenz: [], rossler: [] };      // integrated here, every frame
+let stemReported = { lorenz: null, rossler: null, t: 0 };
+function attractorStep(kind, s, dt) {
+  const d = kind === "lorenz"
+    ? (v) => [10 * (v[1] - v[0]), v[0] * (28 - v[2]) - v[1], v[0] * v[1] - (8 / 3) * v[2]]
+    : (v) => [-v[1] - v[2], v[0] + 0.2 * v[1], 0.2 + v[2] * (v[0] - 5.7)];
+  const h = dt / 4;
+  for (let i = 0; i < 4; i++) {
+    const k1 = d(s), k2 = d(s.map((v, j) => v + h / 2 * k1[j])), k3 = d(s.map((v, j) => v + h / 2 * k2[j])), k4 = d(s.map((v, j) => v + h * k3[j]));
+    s = s.map((v, j) => v + h / 6 * (k1[j] + 2 * k2[j] + 2 * k3[j] + k4[j]));
+  }
+  return s;
+}
+// each frame: advance every instrument's system, and pull it gently toward the
+// reported one (carried forward to now) -- smooth, and it stays with the sound
+function advanceStemAttractors(kind, dt, speed) {
+  const rate = kind === "lorenz" ? 0.18 : 0.9;
+  const rep = stemReported[kind];
+  if (!stemStates[kind].length && rep) stemStates[kind] = rep.map((v) => v.slice());
+  stemStates[kind] = stemStates[kind].map((st, k) => {
+    let next = attractorStep(kind, st, rate * speed * STEM_SPEED[k] * dt);
+    if (rep && rep[k]) {
+      const age = Math.min(3, Math.max(0, Date.now() / 1000 - stemReported.t));
+      const there = attractorStep(kind, rep[k], rate * speed * STEM_SPEED[k] * age);
+      next = next.map((v, j) => v + (there[j] - v) * Math.min(1, dt * 1.5));
+    }
+    return next;
+  });
+}
+function stemPosition(preset, k, fallback) {
+  if (preset === "lorenz" || preset === "rossler") {
+    const st = stemStates[preset][k];
+    if (!st) return fallback;
+    return preset === "lorenz" ? [st[0] / 15, (st[2] - 25) / 13, st[1] / 20] : [st[0] / 2.6, st[1] / 2.6, st[2] / 7 - 0.6];
+  }
+  const f = FX_PATHS[preset];
+  return f ? f(fxPhase * STEM_SPEED[k] + STEM_PHASE[k]) : fallback;
+}
+
+function syncFxPosition(pos) {
+  if (pos.stems_lorenz && pos.stems_lorenz.length) { stemReported.lorenz = pos.stems_lorenz; stemReported.t = pos.t; }
+  if (pos.stems_rossler && pos.stems_rossler.length) { stemReported.rossler = pos.stems_rossler; stemReported.t = pos.t; }
+  if (!pos) return;
+  fxSync = pos;
+  renderHead();
+  const newDelay = Math.round((pos.delay_ms || 0) / 100) * 100;
+  if (pos.ai !== aiState || newDelay !== heardDelayMs) { aiState = pos.ai; heardDelayMs = newDelay; renderFx(fxState); }
+  if (pos.ai_target_ms != null && pos.ai_target_ms !== aiTargetMs) { aiTargetMs = pos.ai_target_ms; renderAccel(); }
+  // Where the sound really is (the reported phase, carried forward to now).
+  // Not snapped to: drawFxView eases toward it, or a 2-second correction
+  // shows as a lurch -- multiplied by each instrument's own speed.
+  fxPhaseRef = { u: pos.u, t: pos.t, speed: pos.speed || 1 };
+  const ageSec = Math.max(0, Date.now() / 1000 - pos.t);
+  const target = pos.u + (2 * Math.PI / LAP_SECONDS) * (pos.speed || 1) * ageSec;
+  if (Math.abs(target - fxPhase) > Math.PI) fxPhase = target;   // a big jump (new preset): go there
+  if (pos.lorenz && fxState["8d"] === "lorenz") lorenzState = pos.lorenz.slice();
+  if (pos.rossler && fxState["8d"] === "rossler") rosslerState = pos.rossler.slice();
+}
+// The view redraws at most FX_FPS times a second: the motion is eased, so 40
+// looks as smooth as the display's 120 -- at a third of the drawing (it was
+// the biggest heat source of all of Dromac, ahead of the audio and the AI).
+const FX_FPS = 40;
+// colours and fonts from the stylesheet, re-read once a second, not every frame
+let fxStyleCache = { t: -1e9 };
+function fxStyles(now) {
+  if (now - fxStyleCache.t > 1000) {
+    fxStyleCache = {
+      t: now,
+      accent: getComputedStyle(document.documentElement).getPropertyValue("--accent1").trim() || "#33ff99",
+      mono: getComputedStyle(document.body).getPropertyValue("--font-mono") || "monospace",
+    };
+  }
+  return fxStyleCache;
+}
+function drawFxView(now) {
+  if (now - fxLastFrame < 1000 / FX_FPS - 2) { requestAnimationFrame(drawFxView); return; }
+  const dt = Math.min(0.1, (now - fxLastFrame) / 1000);
+  fxLastFrame = now;
+  const dpr = window.devicePixelRatio || 1;
+  const W = fxView.clientWidth, H = fxView.clientHeight;
+  if (!W || !H) { requestAnimationFrame(drawFxView); return; } // hidden: nothing to draw
+  if (fxView.width !== Math.round(W * dpr) || fxView.height !== Math.round(H * dpr)) { fxView.width = Math.round(W * dpr); fxView.height = Math.round(H * dpr); }
+  const c = fxCtx;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, W, H);
+  const accent = fxStyles(now).accent;
+  const preset = fxState["8d"];
+  // lightning (rain on): the view lights up -- a flash and a flicker -- and the
+  // thunder follows a few seconds later, as far off as the strike was
+  if (flashStart != null) {
+    const ago = (now - flashStart) / 1000;
+    if (ago >= 0.45) flashStart = null;
+    else {
+      const flick = ago < 0.08 ? 1 : ago < 0.14 ? 0.25 : ago < 0.22 ? 0.8 : Math.max(0, 1 - (ago - 0.22) / 0.23) * 0.5;
+      c.fillStyle = `rgba(220, 230, 255, ${0.35 * flick})`;
+      c.fillRect(0, 0, W, H);
+    }
+  }
+  const speed = fxState.speed || 1;
+  const running = fxState["8d_on"] && speakerOn;
+  if (running) {
+    fxPhase += (2 * Math.PI / LAP_SECONDS) * speed * dt;
+    // ease toward the true position (~0.5 s), so corrections never jerk
+    if (fxPhaseRef) {
+      const target = fxPhaseRef.u + (2 * Math.PI / LAP_SECONDS) * fxPhaseRef.speed * Math.max(0, Date.now() / 1000 - fxPhaseRef.t);
+      fxPhase += (target - fxPhase) * Math.min(1, dt * 2);
+    }
+  }
+
+  // camera: fixed, just behind and above you, facing the way you face -- so
+  // your head stays still (nose pointing into the screen) and only the sound moves
+  const yaw = 0, pitch = 0.62;
+  // fit the figure: the near & far paths reach ~6 m, the others ~1.5 m
+  const reach = { auto: 2.4, stage: 3.6, comet: 6.2, golden: 6.2, rose: 3.8, torus: 4.4, spiro: 3.8, pendulum: 3.1, zoom: 5.6, tide: 5.2, loxodrome: 2.9, rossler: 4.2, lorenz: 2.2 }[preset] || 1.6;
+  // perspective (the camera never moves): far things smaller and dimmer, near
+  // things bigger; every sound stands on a stem over its shadow on the
+  // ear-level floor, so its height and where it is on the floor both read
+  const cam = reach * 3;
+  const scale = Math.min(W / 2, H * 0.62) / (reach * 1.2);
+  const cx = W / 2, cy = H / 2 + 2;
+  const project = ([x, y, z]) => {
+    const X = x * Math.cos(yaw) - y * Math.sin(yaw);
+    const D = x * Math.sin(yaw) + y * Math.cos(yaw);
+    const depth = D * Math.cos(pitch) - z * Math.sin(pitch);
+    const k = cam / Math.max(cam * 0.4, cam + depth);
+    return [cx + scale * k * X, cy - scale * k * (z * Math.cos(pitch) + D * Math.sin(pitch)), depth, k];
+  };
+  const fade = (depth) => Math.max(0.4, Math.min(1, 1 - depth / (reach * 2.4)));
+  // the floor at ear level: distance rings (1 m, then out to the path's
+  // reach) and the front/back, left/right lines through you
+  c.lineWidth = 1;
+  const rings = [1];
+  for (let r = 2; r <= reach * 1.1; r *= 2) rings.push(r);
+  if (reach > 1.6 && rings[rings.length - 1] < reach * 0.8) rings.push(Math.round(reach));
+  rings.forEach((r) => {
+    c.strokeStyle = r === 1 ? "rgba(255,255,255,0.13)" : "rgba(255,255,255,0.06)";
+    c.beginPath();
+    for (let a = 0; a <= 96; a++) {
+      const [px, py] = project([r * Math.cos(a / 96 * 2 * Math.PI), r * Math.sin(a / 96 * 2 * Math.PI), 0]);
+      a ? c.lineTo(px, py) : c.moveTo(px, py);
+    }
+    c.stroke();
+  });
+  const edge = rings[rings.length - 1];
+  c.strokeStyle = "rgba(255,255,255,0.06)";
+  [[[-edge, 0, 0], [edge, 0, 0]], [[0, -edge, 0], [0, edge, 0]]].forEach(([a, b]) => {
+    const [ax, ay] = project(a), [bx, by] = project(b);
+    c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+  });
+  const monoFont = fxStyles(now).mono;
+  c.font = "9px " + monoFont;
+  c.fillStyle = "rgba(255,255,255,0.28)";
+  c.textAlign = "center";
+  [["front", [0, edge, 0], -4], ["back", [0, -edge, 0], 11], ["L", [-edge, 0, 0], -4], ["R", [edge, 0, 0], -4]].forEach(([t, p, dy]) => {
+    const [px, py] = project(p);
+    c.fillText(t, px + (t === "L" ? -8 : t === "R" ? 8 : 0), py + dy);
+  });
+  c.textAlign = "left";
+  // the listener: a head (with ears) and a nose pointing to the front
+  const [hx, hy, , hk] = project([0, 0, 0]);
+  // the head turns with yours (head tracking)
+  const headYaw = (fxSync && fxSync.head && fxSync.head.on) ? fxSync.head.yaw : 0;
+  shownHeadYaw += (headYaw - shownHeadYaw) * Math.min(1, dt * 10);
+  const turned = ([x, y, z]) => [x * Math.cos(shownHeadYaw) - y * Math.sin(shownHeadYaw), x * Math.sin(shownHeadYaw) + y * Math.cos(shownHeadYaw), z];
+  const [nx, ny] = project(turned([0, 0.3, 0]));
+  c.fillStyle = "rgba(255,255,255,0.08)";
+  c.beginPath(); c.ellipse(hx, hy, 9 * hk, 9 * hk * Math.sin(pitch), 0, 0, 2 * Math.PI); c.fill();
+  c.fillStyle = "rgba(255,255,255,0.75)";
+  [-0.13, 0.13].forEach((ex) => { const [ax, ay] = project(turned([ex, 0, 0])); c.beginPath(); c.arc(ax, ay, 1.8, 0, 2 * Math.PI); c.fill(); });
+  c.beginPath(); c.arc(hx, hy, 4.5, 0, 2 * Math.PI); c.fill();
+  c.strokeStyle = "rgba(255,255,255,0.75)";
+  c.beginPath(); c.moveTo(hx, hy); c.lineTo(nx, ny); c.stroke();
+  // a sound in 3D: the stem down (or, below ear level, dashed up) to its
+  // shadow on the floor, then the dot -- farther ones first, sized by depth
+  const drawSources = (list) => {
+    // what you're not hearing stays on the map, greyed out: the singer with
+    // vocals off; everything but the drums with drums only
+    const PART_OF = { vocals: "vocals", drums: "drums", kick: "drums", snare: "drums", toms: "drums",
+      hihat: "drums", cymbals: "drums", bass: "bass", other: "other" };
+    const h = hearing();
+    const silent = (label) => list.length > 1 && label && PART_OF[label] && !h[PART_OF[label]];
+    // auto: the part in the spotlight gets a ring
+    const spotPart = fxState["8d"] === "auto" && autoInfo ? autoInfo.spotlight : null;
+    // (one ring per part: the kit's or the band's first dot, not all of them)
+    let ringed = false;
+    const spotlit = (label) => {
+      if (ringed || !spotPart || !label || PART_OF[label] !== spotPart) return false;
+      return (ringed = true);
+    };
+    const items = list.map((s) => ({ ...s, ...(silent(s.label) ? { color: "#6b6b6b", dim: 0.45 } : {}),
+      q: project(s.p), g: project([s.p[0], s.p[1], 0]) }))
+      .sort((a, b) => b.q[2] - a.q[2]);
+    for (const s of items) {
+      const f = fade(s.q[2]) * (s.dim || 1);
+      c.globalAlpha = 0.45 * f;
+      c.strokeStyle = s.color;
+      c.setLineDash(s.p[2] < 0 ? [2, 3] : []);
+      c.beginPath(); c.moveTo(s.g[0], s.g[1]); c.lineTo(s.q[0], s.q[1]); c.stroke();
+      c.setLineDash([]);
+      c.globalAlpha = 0.3 * f;
+      c.fillStyle = s.color;
+      c.beginPath(); c.ellipse(s.g[0], s.g[1], 5 * s.g[3], 5 * s.g[3] * Math.sin(pitch), 0, 0, 2 * Math.PI); c.fill();
+    }
+    for (const s of items) {
+      const f = fade(s.q[2]) * (s.dim || 1);
+      // the glow: a soft halo behind the dot (a canvas blur on every dot,
+      // every frame, cost more than everything else in the view)
+      c.fillStyle = s.color;
+      c.globalAlpha = 0.22 * f;
+      c.beginPath(); c.arc(s.q[0], s.q[1], s.r * s.q[3] * 1.45, 0, 2 * Math.PI); c.fill();
+      c.globalAlpha = f;
+      c.beginPath(); c.arc(s.q[0], s.q[1], s.r * s.q[3], 0, 2 * Math.PI); c.fill();
+      if (spotlit(s.label) && !s.dim) {
+        c.strokeStyle = s.color; c.lineWidth = 1.2;
+        c.beginPath(); c.arc(s.q[0], s.q[1], s.r * s.q[3] + 4, 0, 2 * Math.PI); c.stroke();
+        c.lineWidth = 1;
+      }
+      if (s.label) {
+        c.font = "10px " + monoFont;
+        c.fillStyle = s.dim ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.75)";
+        c.fillText(s.dim ? s.label + " (off)" : s.label, s.q[0] + s.r * s.q[3] + 3, s.q[1] + 3);
+      }
+    }
+    c.globalAlpha = 1;
+  };
+
+  // the path: the whole figure faintly, a fading trail, and the sound itself
+  let trail = [], here;
+  if (preset === "lorenz" || preset === "rossler") {
+    const isL = preset === "lorenz";
+    if (running) here = isL ? lorenzStep(0.18 * speed * dt) : rosslerStep(0.9 * speed * dt);
+    else if (isL) { const [x, y, z] = lorenzState; here = [x / 15, (z - 25) / 13, y / 20]; }
+    else { const [x, y, z] = rosslerState; here = [x / 2.6, y / 2.6, z / 7 - 0.6]; }
+    if (lorenzTrail.preset !== preset) { lorenzTrail.length = 0; lorenzTrail.preset = preset; }
+    lorenzTrail.push(here);
+    if (lorenzTrail.length > 900) lorenzTrail.shift();
+    trail = lorenzTrail;
+  } else if (FX_PATHS[preset]) {
+    const f = FX_PATHS[preset];
+    const span = FX_PERIOD[preset] || 2 * Math.PI;
+    if (!FX_OPEN.has(preset)) {
+      c.strokeStyle = "rgba(255,255,255,0.10)";
+      c.beginPath();
+      for (let k = 0; k <= 400; k++) {
+        const [px, py] = project(f(fxPhase + (k / 400) * span));
+        k ? c.lineTo(px, py) : c.moveTo(px, py);
+      }
+      c.stroke();
+    }
+    for (let k = 160; k >= 0; k--) trail.push(f(fxPhase - (k / 160) * 1.5 * Math.PI));
+    here = f(fxPhase);
+  }
+  if (preset === "auto") {
+    if (autoPos) {
+      if (!autoShown || autoShown.length !== autoPos.length) autoShown = autoPos.map((p) => p.slice());
+      autoShown = autoShown.map((p, k) => p.map((v, j) => v + (autoPos[k][j] - v) * Math.min(1, dt * 6)));
+      const reported = (fxSync && fxSync.names || []).map(stemLabel);
+      const names = reported.length === autoShown.length ? reported :
+        autoShown.length === 5 ? ["vocals", "drums", "bass", "other", "other "] : ["song"];
+      const colors = { ...STEM_COLORS, vocals: accent, song: accent };
+      drawSources(autoShown.map((p, k) => ({ p, color: colors[names[k]], r: 4.8, label: names.length > 1 ? names[k].trim() : "" })));
+    }
+    if (autoInfo) {
+      const learned = autoInfo.states ? " · " + Array.from({length: autoInfo.states}, (_, i) => i + 1 === autoInfo.state ? "●" : "○").join("") : (autoInfo.listening ? " · learning the song…" : "");
+      // where it is in the bar, what's in the spotlight, and what's coming
+      const beatDots = autoInfo.beat ? " · " + [1, 2, 3, 4].map((b) => b === autoInfo.beat ? "▮" : "▯").join("") : "";
+      const coming = autoInfo.drop_in != null ? ` · drop in ${autoInfo.drop_in.toFixed(1)} s` : "";
+      const spot = autoInfo.spotlight ? ` · spotlight: ${autoInfo.spotlight}` : "";
+      // what the engineer (self-mix) is doing to the sound right now
+      const eng = autoInfo.engineer && autoInfo.engineer.on && autoInfo.engineer.doing ? ` · ${autoInfo.engineer.doing}` : "";
+      setCaption(`auto · ${autoInfo.bpm} bpm · ${autoInfo.chord}${learned}${beatDots}${spot}${coming}${eng}`);
+    }
+    requestAnimationFrame(drawFxView);
+    return;
+  }
+  // split modes: one dot per instrument -- on the stage, or chasing each other
+  // around the path a quarter turn apart (same layout as dromac_fx.py)
+  const split = fxState["8d_on"] && (fxState.mode === "dsp" || fxState.mode === "ai");
+  if (split && running && (preset === "lorenz" || preset === "rossler")) advanceStemAttractors(preset, dt, speed);
+  if (split && here) {
+    const STAGE = { vocals: [0, 1.5, 0.15], drums: [0, 3.2, 0.6], bass: [0.9, 1.1, -0.35], "other": [-2.2, 1.6, 0.2], "other ": [2.2, 1.6, 0.2],
+      kick: [0, 2.6, -0.5], snare: [-0.7, 2.2, 0.3], toms: [1.3, 2.6, 0.2], hihat: [-1.4, 1.6, 0.5], cymbals: [0.4, 3.4, 1.5] };
+    const COLORS = { ...STEM_COLORS, vocals: accent };
+    // which instruments are playing (the kit, once it's split), as reported
+    const reported = (fxSync && fxSync.names || []).map(stemLabel);
+    const names = reported.length === 9 ? reported : ["vocals", "drums", "bass", "other", "other "];
+    const kitCenter = preset === "stage" ? STAGE.drums : stemPosition(preset, 1, here);
+    const tight = fxState.kit_tight ?? true;
+    drawSources(names.map((name, k) => ({
+      p: tight && KIT_OFFSETS[name] ? kitAround(kitCenter, name) : preset === "stage" ? STAGE[name] : stemPosition(preset, k, here),
+      color: COLORS[name], r: 4.5, label: name.trim(),
+    })));
+    requestAnimationFrame(drawFxView);
+    return;
+  }
+  for (let k = 1; k < trail.length; k++) {
+    const [ax, ay, ad, ak] = project(trail[k - 1]), [bx, by] = project(trail[k]);
+    c.globalAlpha = (k / trail.length) ** 1.6 * 0.9 * fade(ad);
+    c.strokeStyle = accent;
+    c.lineWidth = 1.6 * ak;
+    c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+  }
+  c.globalAlpha = 1;
+  c.lineWidth = 1;
+  if (here) drawSources([{ p: here, color: accent, r: 5.5 }]);
+  requestAnimationFrame(drawFxView);
+}
+requestAnimationFrame(drawFxView);
+
+// ---------- headphones only ----------
+const btnHeadLock = $("btnHeadLock");
+const lockInfo = $("lockInfo");
+let lockState = { on: false, device: null };
+function renderLock(audio) {
+  if (!audio || !audio.lock) return;
+  lockState = audio.lock;
+  btnHeadLock.classList.toggle("on", !!lockState.on);
+  const waiting = lockState.on && audio.on && audio.waiting;
+  lockInfo.classList.toggle("waiting", !!waiting);
+  lockInfo.textContent = !lockState.on ? "" : waiting ? audio.waiting : `· ${lockState.device}`;
+}
+btnHeadLock.onclick = async () => {
+  const res = await post("/api/audio/lock", { on: !lockState.on });
+  if (res && res.error) showToast(res.error, "error");
+  if (res && res.audio) renderLock({ ...res.audio, on: speakerOn });
+};
+
+btnSpeaker.onclick = async () => {
+  // the audio link: off = back to normal on both devices (see server set_link)
+  const res = await post("/api/audio/link", { on: !speakerOn });
+  if (res && res.audio) renderSpeaker(res.audio);
+};
 // Closing/stopping from the Mac only detaches the VIEW -- it deliberately does
 // NOT tell the phone to end the capture session. Android only allows a screen-
 // capture grant to be used to create ONE VirtualDisplay, ever, even on the same

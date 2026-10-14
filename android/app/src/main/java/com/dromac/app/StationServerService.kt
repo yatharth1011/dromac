@@ -84,6 +84,11 @@ class StationServerService : Service() {
         // exposed so MainActivity can show real connection status, not just whether
         // the various permissions are granted.
         @Volatile var lastRequestAt: Long = 0
+        // Same, but only requests that came over the network (not the USB cable or
+        // the Bluetooth link, which both arrive on loopback). Drives the beacon: it
+        // keeps broadcasting while the Mac is on a fallback link, so the Mac can
+        // still move back up to Wi-Fi the moment that works again.
+        @Volatile var lastLanRequestAt: Long = 0
         // Set by SmsOtpReceiver when a verification code is spotted in an incoming SMS.
         @Volatile var latestOtp: String? = null
         @Volatile var latestOtpAt: Long = 0
@@ -95,6 +100,14 @@ class StationServerService : Service() {
     private var serverSocket: ServerSocket? = null
     private var serverThread: Thread? = null
     private val port = 8822
+    private val bleLink by lazy { BleLink(this, port) }
+    private val spillGuard by lazy { SpillGuard(this) }
+
+    // audio link off (AudioLink): back to normal -- nothing gets paused any more;
+    // the Mac sees it within a couple of seconds and lets go of the audio
+    fun onAudioLinkChanged(on: Boolean) {
+        if (!on) spillGuard.handOverThenDisable()
+    }
     @Volatile private var running = false
 
     private var nsdManager: NsdManager? = null
@@ -121,13 +134,14 @@ class StationServerService : Service() {
     private val bluetoothStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
-                BluetoothAdapter.STATE_ON -> maintainBleAdvertising()
+                BluetoothAdapter.STATE_ON -> { bleLink.start(); maintainBleAdvertising() }
                 BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> {
                     // The adapter itself killed our advertise set; drop our stale
                     // handle so the next tick does a clean re-acquire instead of
                     // calling stopAdvertising on a dead reference.
                     bleAdvertiser = null
                     bleAdvertising = false
+                    bleLink.stop()
                 }
             }
         }
@@ -135,6 +149,7 @@ class StationServerService : Service() {
     private val bleHandler = Handler(Looper.getMainLooper())
     private val bleRetryRunnable = object : Runnable {
         override fun run() {
+            if (!bleLink.isRunning) bleLink.start()
             maintainBleAdvertising()
             bleHandler.postDelayed(this, 5000)
         }
@@ -148,9 +163,10 @@ class StationServerService : Service() {
     private val CONNECTED_IDLE_MS = 6000L // Mac polls every ~2s while its dashboard is open
 
     private fun isMacConnected(): Boolean =
-        lastRequestAt > 0 && System.currentTimeMillis() - lastRequestAt < CONNECTED_IDLE_MS
+        lastLanRequestAt > 0 && System.currentTimeMillis() - lastLanRequestAt < CONNECTED_IDLE_MS
 
     private fun maintainBleAdvertising() {
+        if (bleLink.hasClients) return // see BleLink.hasClients: restarting would drop the link
         if (isMacConnected()) {
             if (bleAdvertising) stopBleAdvertising()
         } else {
@@ -194,6 +210,13 @@ class StationServerService : Service() {
             registerReceiver(bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
         } catch (_: Exception) {}
         try {
+            registerReceiver(lockStateReceiver, IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+            })
+        } catch (_: Exception) {}
+        try {
             telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
             @Suppress("DEPRECATION")
             telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
@@ -201,6 +224,7 @@ class StationServerService : Service() {
         // Retried on a timer (not just once) because BLUETOOTH_ADVERTISE permission may be
         // granted moments after this service starts, and because the adapter can be off at boot.
         bleHandler.post(bleRetryRunnable)
+        spillGuard.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -215,8 +239,11 @@ class StationServerService : Service() {
         unregisterNsd()
         bleHandler.removeCallbacks(bleRetryRunnable)
         stopBleAdvertising()
+        bleLink.stop()
+        spillGuard.stop()
         try { connectivityManager?.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(lockStateReceiver) } catch (_: Exception) {}
         @Suppress("DEPRECATION")
         try { telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE) } catch (_: Exception) {}
         try { keepAwakeWakeLock?.release() } catch (_: Exception) {}
@@ -234,10 +261,15 @@ class StationServerService : Service() {
     // system can drop it silently (see bleRetryRunnable).
     private fun startBleAdvertising(force: Boolean = false) {
         try {
-            val ip = getLocalIpv4() ?: return
-            if (!force && ip == lastAdvertisedIp && bleAdvertising) return
+            // Always broadcast, address or not: on mobile data alone (or between
+            // networks) there's no address to give, but the Mac still needs to
+            // know the phone is here -- that's what sends it to the Bluetooth
+            // data link, the one route that needs no shared network.
+            val ips = getAdvertiseIpv4s()
+            val key = if (ips.isEmpty()) "none" else ips.joinToString(",")
+            if (!force && key == lastAdvertisedIp && bleAdvertising) return
             stopBleAdvertising()
-            val payload = buildBlePayload(ip, port) ?: return
+            val payload = buildBlePayload(ips, port) ?: return
             val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager ?: return
             val adapter: BluetoothAdapter = btManager.adapter ?: return
             if (!adapter.isEnabled) return
@@ -245,16 +277,22 @@ class StationServerService : Service() {
             val settings = AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
                 .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .setConnectable(false)
+                .setConnectable(true) // the Mac may open the Bluetooth data link (BleLink)
                 .build()
             val data = AdvertiseData.Builder()
                 .setIncludeDeviceName(false)
                 .setIncludeTxPowerLevel(false)
                 .addManufacturerData(BLE_MANUFACTURER_ID, payload)
                 .build()
+            // the data link's service id, in the scan response (no room left in
+            // the advert itself): the Mac's link helper finds the phone by it
+            val scanResponse = AdvertiseData.Builder()
+                .setIncludeDeviceName(false)
+                .addServiceUuid(android.os.ParcelUuid(BleLink.SERVICE_UUID))
+                .build()
             bleAdvertiser = advertiser
-            advertiser.startAdvertising(settings, data, bleAdvertiseCallback)
-            lastAdvertisedIp = ip
+            advertiser.startAdvertising(settings, data, scanResponse, bleAdvertiseCallback)
+            lastAdvertisedIp = key
         } catch (_: SecurityException) {
             // BLUETOOTH_ADVERTISE not granted yet; the retry timer will try again,
             // and mDNS/IP-scan discovery still work in the meantime.
@@ -266,28 +304,56 @@ class StationServerService : Service() {
         bleAdvertising = false
     }
 
-    private fun getLocalIpv4(): String? {
-        return try {
-            val interfaces = java.util.Collections.list(NetworkInterface.getNetworkInterfaces())
-            for (iface in interfaces) {
-                val addresses = java.util.Collections.list(iface.inetAddresses)
-                for (addr in addresses) {
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) return addr.hostAddress
+    // Every address the Mac might reach us on, best first: the Wi-Fi network we're
+    // joined to (campus/home), then our own hotspot (for a Mac sitting on it).
+    // Taking the first interface the system happens to list used to pick the
+    // hotspot (wlan1) over campus Wi-Fi (wlan0) whenever the hotspot was on, so
+    // a Mac on campus Wi-Fi got an address it could never reach. Mobile data,
+    // VPN and USB-tether interfaces are skipped: the Mac can't reach those.
+    private fun getAdvertiseIpv4s(): List<String> {
+        val ips = mutableListOf<String>()
+        try {
+            val cm = connectivityManager ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            if (cm != null) {
+                for (network in cm.allNetworks) {
+                    val caps = cm.getNetworkCapabilities(network) ?: continue
+                    // The joined Wi-Fi only: Android also reports our own hotspot and
+                    // VPNs riding on Wi-Fi (BlazingNet's tun0) as Wi-Fi networks.
+                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+                    val link = cm.getLinkProperties(network) ?: continue
+                    for (la in link.linkAddresses) {
+                        val addr = la.address
+                        if (addr is Inet4Address && !addr.isLoopbackAddress) addr.hostAddress?.let { if (it !in ips) ips.add(it) }
+                    }
                 }
             }
-            null
-        } catch (_: Exception) {
-            null
-        }
+        } catch (_: Exception) {}
+        try {
+            val wifiLike = Regex("^(wlan|swlan|ap|softap)\\d*")
+            for (iface in java.util.Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!iface.isUp || !wifiLike.containsMatchIn(iface.name)) continue
+                for (addr in java.util.Collections.list(iface.inetAddresses)) {
+                    if (addr is Inet4Address && !addr.isLoopbackAddress) addr.hostAddress?.let { if (it !in ips) ips.add(it) }
+                }
+            }
+        } catch (_: Exception) {}
+        return ips.take(3)
     }
 
-    private fun buildBlePayload(ip: String, port: Int): ByteArray? {
-        val parts = ip.split(".").map { it.toIntOrNull() ?: return null }
-        if (parts.size != 4) return null
-        return byteArrayOf(
-            parts[0].toByte(), parts[1].toByte(), parts[2].toByte(), parts[3].toByte(),
-            ((port shr 8) and 0xFF).toByte(), (port and 0xFF).toByte()
-        )
+    // ip1[, ip2, ip3] (4 bytes each) then port (2 bytes). A single address is the
+    // original 6-byte format, so an older Mac helper still understands it.
+    private fun buildBlePayload(ips: List<String>, port: Int): ByteArray? {
+        val out = mutableListOf<Byte>()
+        for (ip in ips) {
+            val parts = ip.split(".").map { it.toIntOrNull() ?: return null }
+            if (parts.size != 4) return null
+            parts.forEach { out.add(it.toByte()) }
+        }
+        out.add(((port shr 8) and 0xFF).toByte())
+        out.add((port and 0xFF).toByte())
+        return out.toByteArray()
     }
 
     // Advertises this device on mDNS/Bonjour as "_dromac._tcp" so the Mac
@@ -431,7 +497,42 @@ class StationServerService : Service() {
 
     private fun route(method: String, path: String, body: String, out: OutputStream, socket: Socket) {
         lastRequestAt = System.currentTimeMillis()
-        if (bleAdvertising) stopBleAdvertising() // Mac is actively talking to us now; no need to keep beaconing
+        val fromLoopback = socket.inetAddress?.isLoopbackAddress == true
+        if (fromLoopback) spillGuard.macOverUsbAt = lastRequestAt   // the Mac is on the cable (adb forward)
+        if (!fromLoopback) {
+            lastLanRequestAt = lastRequestAt
+            if (bleAdvertising) stopBleAdvertising() // Mac is talking to us over Wi-Fi; no need to keep beaconing
+        }
+        // The Bluetooth link's pairing key: only over the USB cable (adb forward
+        // arrives on loopback). The link itself refuses to relay this path.
+        // "Headphones only" (see SpillGuard): set by the Mac when its audio is on.
+        if (method == "POST" && path == "/api/audio/guard") {
+            val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+            val on = json.optBoolean("on", false)
+            spillGuard.setEnabled(on, if (json.has("device")) json.optString("device") else null)
+            return writeJson(out, 200, "{\"ok\":true,\"on\":$on}")
+        }
+        if (method == "POST" && path == "/api/audio/bt_by_mac") {
+            val off = try { JSONObject(body).optBoolean("off", false) } catch (_: Exception) { false }
+            spillGuard.setBtOffByMac(off)
+            return writeJson(out, 200, "{\"ok\":true}")
+        }
+        if (method == "POST" && path == "/api/audio/link") {
+            val on = try { JSONObject(body).optBoolean("on", true) } catch (_: Exception) { true }
+            AudioLink.setEnabled(this, on)
+            return writeJson(out, 200, "{\"ok\":true,\"on\":$on}")
+        }
+        if (method == "POST" && path == "/api/media/resume_paused") {
+            return writeJson(out, 200, "{\"ok\":true,\"resumed\":${spillGuard.resumePaused()}}")
+        }
+        if (method == "POST" && path == "/api/media/pause") {
+            return writeJson(out, 200, "{\"ok\":true,\"paused\":${spillGuard.pauseEverything()}}")
+        }
+        if (path == "/api/ble_key") {
+            if (fromLoopback && method == "GET") writeJson(out, 200, JSONObject().put("key", BleLink.key(this)).toString())
+            else writeJson(out, 403, "{\"error\":\"forbidden\"}")
+            return
+        }
         when {
             method == "GET" && path == "/api/state" -> writeJson(out, 200, buildStateJson().toString())
             method == "GET" && path == "/api/artwork" -> serveArtwork(out)
@@ -838,7 +939,23 @@ class StationServerService : Service() {
             root.put("dndAvailable", false)
         }
         root.put("flashlight", torchOn)
-        root.put("keepAwake", keepAwakeWakeLock?.isHeld == true)
+        root.put("keepAwake", keepAwakeWanted)
+        root.put("headphoneLock", spillGuard.enabled)
+        root.put("audioLink", AudioLink.isEnabled(this))
+        // the Mac's capture of the phone's audio is running (so music goes to it,
+        // not the speaker): the Mac waits for this before resuming after a switch
+        root.put("macCapturing", spillGuard.macCapturing())
+        // the phone's address on the Wi-Fi it's joined: the Mac remembers it, so it
+        // can switch to Wi-Fi the moment the cable goes, even with Bluetooth off
+        root.put("wifiIp", getAdvertiseIpv4s().firstOrNull() ?: JSONObject.NULL)
+        // every address the Mac might reach it on: the Wi-Fi it's joined and its
+        // own hotspot (when the Mac is on the hotspot, that's the one that works)
+        root.put("ips", JSONArray(getAdvertiseIpv4s()))
+        // How long ago "headphones only" paused the music (-1: never), so the Mac
+        // can press play again once it's taken the audio back.
+        root.put("spillPausedAgoMs", if (spillGuard.lastPausedAt > 0) System.currentTimeMillis() - spillGuard.lastPausedAt else -1)
+        root.put("spillPauseRoutes", spillGuard.lastPauseReason ?: "")
+        root.put("phoneHeadphones", JSONArray(spillGuard.headphoneOutputs()))
         try {
             val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
             root.put("locked", km.isKeyguardLocked)
@@ -1580,21 +1697,43 @@ class StationServerService : Service() {
         } catch (_: Exception) {}
     }
 
+    // Keep-awake only ever holds the screen while the phone is UNLOCKED. Holding it
+    // regardless used to leave a locked phone sitting on a dimmed lock screen
+    // forever instead of going to sleep. Screen off / locked -> let go; unlocked
+    // again -> take it back, so the switch stays "on" across locks.
+    @Volatile private var keepAwakeWanted = false
+
     private fun toggleKeepAwake(): Boolean {
-        return try {
+        keepAwakeWanted = !keepAwakeWanted
+        applyKeepAwake()
+        return keepAwakeWanted
+    }
+
+    private fun applyKeepAwake() {
+        try {
+            val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val shouldHold = keepAwakeWanted && pm.isInteractive && !km.isKeyguardLocked
             val held = keepAwakeWakeLock?.isHeld == true
-            if (held) {
-                keepAwakeWakeLock?.release()
-                false
-            } else {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (shouldHold && !held) {
+                @Suppress("DEPRECATION")
                 val wl = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, "dromac:keep_awake")
                 wl.acquire()
                 keepAwakeWakeLock = wl
-                true
+            } else if (!shouldHold && held) {
+                keepAwakeWakeLock?.release()
             }
-        } catch (_: Exception) {
-            false
+        } catch (_: Exception) {}
+    }
+
+    private val lockStateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                // Locked: the blackout overlay's FLAG_KEEP_SCREEN_ON would otherwise
+                // hold the lock screen on too.
+                if (blackoutView != null) setBlackout(false)
+            }
+            applyKeepAwake()
         }
     }
 

@@ -19,6 +19,14 @@
         android:layout_height="wrap_content"
         android:layout_marginBottom="18dp" />
 
+    <Button
+        android:id="@+id/audioLinkButton"
+        style="@style/DromacButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="14dp"
+        android:text="Mac audio link" />
+
     <TextView
         android:id="@+id/ipText"
         android:layout_width="match_parent"

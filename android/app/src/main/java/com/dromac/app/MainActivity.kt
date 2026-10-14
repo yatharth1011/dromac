@@ -45,11 +45,24 @@ class MainActivity : Activity() {
         val keyboardButton = findViewById<Button>(R.id.keyboardButton)
         val cameraButton = findViewById<Button>(R.id.cameraAccessButton)
         val openCameraButton = findViewById<Button>(R.id.openCameraButton)
+        // the master switch for the phone's audio on the Mac (see AudioLink)
+        val audioLinkButton = findViewById<Button>(R.id.audioLinkButton)
+        fun showAudioLink() {
+            val on = AudioLink.isEnabled(this)
+            audioLinkButton.text = if (on) "Mac audio link: ON  ·  tap to turn off" else "Mac audio link: OFF  ·  tap to turn on"
+            audioLinkButton.alpha = if (on) 1f else 0.6f
+        }
+        showAudioLink()
+        audioLinkButton.setOnClickListener {
+            AudioLink.setEnabled(this, !AudioLink.isEnabled(this))
+            showAudioLink()
+        }
 
         bleHint.text = "Bluetooth keeps broadcasting even once connected — it's how the Mac " +
             "reconnects instantly if the link ever drops, and the cost is negligible."
 
         fun refresh() {
+            showAudioLink()  // it can also be switched from the Mac
             val status = buildStatus()
             ipText.text = status.ip
             statusContainer.removeAllViews()
@@ -162,12 +175,12 @@ class MainActivity : Activity() {
         // Needed so the phone can continuously broadcast a small "I'm here, connect
         // to this IP" beacon over BLE — lets the Mac find it instantly by proximity
         // instead of scanning IP ranges. No UI flow needed; just ask once like POST_NOTIFICATIONS.
+        // BLUETOOTH_CONNECT runs the Bluetooth data link (BleLink), the fallback for
+        // when neither the cable nor Wi-Fi can reach the Mac.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE), 101)
-            }
+            val bt = listOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT)
+                .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+            if (bt.isNotEmpty()) ActivityCompat.requestPermissions(this, bt.toTypedArray(), 101)
         }
 
         // Call answer/caller-ID, SMS OTP capture, next-calendar-event, and "locate

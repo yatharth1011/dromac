@@ -26,6 +26,8 @@
   <true/>
   <key>LSUIElement</key>
   <false/>
+  <key>NSCameraUsageDescription</key>
+  <string>Dromac follows which way your head is turned, so 8D sound stays put around you. Nothing is recorded or sent.</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>Dromac uses Bluetooth to find your phone instantly when it's nearby, instead of scanning the network.</string>
 </dict>

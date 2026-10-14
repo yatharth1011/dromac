@@ -116,6 +116,121 @@
       <div class="recent-tracks-label">$ recently played</div>
       <div id="recentTracksList" class="recent-tracks-list"></div>
     </div>
+    <!-- 8D: where the song is around you right now, in 3D (faded while 8D is off) -->
+    <div id="fxViewWrap" class="fx-view-wrap">
+      <canvas id="fxView" class="fx-view"></canvas>
+      <div id="fxViewCaption" class="fx-view-caption"></div>
+    </div>
+  </section>
+
+  <!-- 8D: the phone's audio in 3D around you -- the live view, what moves
+       (whole song / instruments), the path, and the audio switches -->
+  <section class="card fx-card area-fx">
+    <div class="card-label">$ 8d</div>
+      <!-- Phone audio on this Mac: headphones only, 8D (switch, speed, path) and
+           slowed + reverb. Turning any of them on turns phone audio on. -->
+      <div class="fx-panel">
+        <div class="fx-head">
+          <button id="btn8d" class="fx-switch" title="8D: the song travels around you in 3D"><span class="fx-dot"></span>8d</button>
+          <div class="fx-speed" title="how fast the sound travels">
+            <button id="fxSlower" class="fx-step" aria-label="slower">&minus;</button>
+            <span id="fxSpeed" class="fx-speed-val">1×</span>
+            <button id="fxFaster" class="fx-step" aria-label="faster">+</button>
+          </div>
+          <button id="btnSlowed" class="fx-switch" title="pitch down and a big, dark reverb"><span class="fx-dot"></span>slowed + reverb</button>
+        </div>
+        <div id="fxMode" class="fx-mode" role="group" aria-label="what moves">
+          <button data-mode="8d" class="fx-mode-btn" title="the song as one piece (with 8D on, it travels the path)">no split</button>
+          <button data-mode="dsp" class="fx-mode-btn" title="instruments split apart by maths, instantly">live split</button>
+          <button data-mode="ai" class="fx-mode-btn" title="instruments split apart by AI (Demucs): studio quality, a few seconds behind">ai split</button>
+        </div>
+        <div class="fx-mode-row">
+        <div id="fxModeInfo" class="fx-mode-info"></div>
+        <button id="btnKit" class="fx-switch fx-switch--small" title="ai split: the drums split into their kit -- kick, snare, toms, hi-hat, cymbals -- each moving on its own"><span class="fx-dot"></span>drum kit</button>
+        <span id="kitOpts" class="kit-opts">
+          <button id="btnKitTight" class="fx-switch fx-switch--small on" title="the kit's pieces stand together as one kit (off: each piece goes its own way around you)"><span class="fx-dot"></span>tight</button>
+          <button id="btnKitBoost" class="fx-switch fx-switch--small on" title="+2.5 dB on the split kit, so the hits keep their punch"><span class="fx-dot"></span>boost</button>
+        </span>
+        <button id="btnSelfMix" class="fx-switch fx-switch--small on" title="auto: the AI listens to the sound it makes and engineers it -- unmasking parts that clash, keeping it wide, bright, moving and balanced (off: auto plays neutral)"><span class="fx-dot"></span>self-mix</button>
+        <button id="btnRoom" class="fx-switch fx-switch--small on" title="the room's reverb around the 3D sound (off: dry)"><span class="fx-dot"></span>room</button>
+      </div>
+        <!-- ai split only: how much of the GPU to spend -- more GPU, less delay.
+           All the way right is "ultramuse". -->
+      <div id="accelRow" class="accel-row">
+        <span class="accel-label">ai acceleration</span>
+        <input id="accelSlider" class="accel-slider" type="range" min="15" max="80" step="5" value="50" aria-label="AI acceleration (GPU use)" />
+        <span id="accelInfo" class="accel-info"></span>
+      </div>
+      <!-- which instruments you hear: click one to leave it out (or bring it
+           back), double-click to hear only that one. Needs a split. -->
+      <div id="hearRow" class="hear-row" role="group" aria-label="instruments you hear">
+        <span class="accel-label">hear</span>
+        <button data-part="vocals" class="hear-chip" title="click: on/off · double-click: only the vocals"><span class="hear-dot"></span>vocals</button>
+        <button data-part="drums" class="hear-chip" title="click: on/off · double-click: only the drums"><span class="hear-dot"></span>drums</button>
+        <button data-part="bass" class="hear-chip" title="click: on/off · double-click: only the bass"><span class="hear-dot"></span>bass</button>
+        <button data-part="other" class="hear-chip" title="click: on/off · double-click: only the rest (guitars, keys, synths)"><span class="hear-dot"></span>other</button>
+        <button id="hearAll" class="hear-all" title="hear everything again">all</button>
+      </div>
+      <!-- bass boost: a low shelf under 100 Hz, 0 to +12 dB; works with or
+           without 8D -->
+      <div class="accel-row">
+        <span class="accel-label">bass boost</span>
+        <input id="bassSlider" class="accel-slider" type="range" min="0" max="12" step="1" value="0" aria-label="bass boost" />
+        <span id="bassInfo" class="accel-info bass-info">off</span>
+      </div>
+      <div id="fx8d" role="group" aria-label="8D path">
+          <div class="fx-group-label">around you</div>
+          <div class="fx-presets">
+            <button data-fx8d="auto" class="fx-preset fx-preset--auto" title="the music moves itself: loudness sets distance, brightness height, hits push, the chords (on the circle of fifths) set direction, the beat turns the drums">auto ✨</button>
+          <button data-fx8d="still" class="fx-preset" title="no 3D, no motion: the song as it is (with vocals off, minus the singer)">still</button>
+          <button data-fx8d="stage" class="fx-preset" title="split modes: a concert -- singer in front, drums behind and up, bass low and close, the rest wide">stage</button>
+            <button data-fx8d="orbit" class="fx-preset" title="a circle around you">orbit</button>
+            <button data-fx8d="helix" class="fx-preset" title="spirals up over your head, then back down">helix</button>
+            <button data-fx8d="loop" class="fx-preset" title="a vertical wheel: over your head and under you">loop</button>
+            <button data-fx8d="infinity" class="fx-preset" title="a figure-8 around each ear, swooping overhead">&infin;</button>
+            <button data-fx8d="saddle" class="fx-preset" title="rises in front and behind, dips at the sides">saddle</button>
+            <button data-fx8d="knot" class="fx-preset" title="a trefoil knot tied around your head">knot</button>
+            <button data-fx8d="lissajous" class="fx-preset" title="a 3:2:5 Lissajous knot">lissa</button>
+            <button data-fx8d="gyro" class="fx-preset" title="a tilted orbit whose plane slowly turns">gyro</button>
+            <button data-fx8d="swing" class="fx-preset" title="left to right and back, through the front">swing</button>
+            <button data-fx8d="wander" class="fx-preset" title="drifts all around, never quite repeating">wander</button>
+            <button data-fx8d="lorenz" class="fx-preset" title="the Lorenz attractor: chaos theory's butterfly">lorenz</button>
+            <button data-fx8d="breathe" class="fx-preset" title="drifts from a whisper at your ear to far away">breathe</button>
+          </div>
+        </div>
+        <div class="lock-row">
+          <button id="btnHead" class="fx-switch" title="the Mac's camera follows which way your head is turned, so the 8D sound stays put around you (nothing is recorded)"><span class="fx-dot"></span>head tracking</button>
+          <button id="btnRecenter" class="hear-all" title="wherever you're facing now becomes the front">recenter</button>
+          <span id="headInfo" class="lock-info"></span>
+          <span class="lock-gap"></span>
+          <button id="btnHeadLock" class="fx-switch" title="never let the phone's audio play out loud"><span class="fx-dot"></span>headphones only</button>
+          <span id="lockInfo" class="lock-info"></span>
+        </div>
+      </div>
+    <!-- ambience: rain and thunder, made live (never a loop), under the music -->
+    <div class="ambience-card ambience-block">
+      <div class="rain-row">
+        <button id="btnRain" class="fx-switch" title="rain and thunder, made live -- it never repeats"><span class="fx-dot"></span>rain</button>
+        <select id="rainPreset" class="rain-preset" aria-label="rain preset" title="storm cycle: a whole storm, ~30 min -- drizzle on leaves, rain, downpour, thunderstorm, sheltering at a window, the tin roof, the storm moving off, the dripping forest -- different every time">
+          <option value="storm cycle">storm cycle ✨</option>
+          <option value="drizzle">drizzle</option>
+          <option value="steady">steady</option>
+          <option value="downpour">downpour</option>
+          <option value="thunderstorm">thunderstorm</option>
+          <option value="distant storm">distant storm</option>
+          <option value="tin roof">tin roof</option>
+          <option value="window">window</option>
+          <option value="forest">forest</option>
+        </select>
+        <input id="rainVolume" class="accel-slider" type="range" min="0" max="100" step="1" value="35" aria-label="rain volume" />
+        <span id="rainVolumeInfo" class="accel-info bass-info">35%</span>
+      </div>
+      <div class="rain-row thunder-row">
+        <span class="accel-label">thunder</span>
+        <input id="thunderLevel" class="accel-slider" type="range" min="-12" max="12" step="1" value="0" aria-label="thunder level against the rain" />
+        <span id="thunderLevelInfo" class="accel-info bass-info">0 dB</span>
+      </div>
+    </div>
   </section>
 
   <div class="col-middle area-device">
@@ -177,19 +292,28 @@
 
   <section class="card quick-actions area-quick">
     <div class="card-label">$ quick_actions</div>
+    <!-- Two rows, each spanning the card edge to edge, laid like bricks: labeled
+         tiles for the bigger features sit at alternating ends, icon tiles share
+         the rest of the width evenly. -->
     <div class="quick-grid">
       <button id="btnRing" class="grid-tile" title="ring phone"><span class="grid-tile-icon">&#9743;</span></button>
       <button id="btnFlashlight" class="grid-tile" title="flashlight"><span class="grid-tile-icon">&#9728;</span></button>
       <button id="btnDnd" class="grid-tile" title="do not disturb"><span class="grid-tile-icon">&#8856;</span></button>
       <button id="btnWake" class="grid-tile" title="wake screen"><span class="grid-tile-icon">&#9211;</span></button>
-      <button id="btnKeepAwake" class="grid-tile" title="keep awake"><span class="grid-tile-icon">&#8734;</span></button>
+      <button id="btnMirror" class="grid-tile grid-tile--labeled" title="remote screen"><span class="grid-tile-icon">&#10697;</span><span class="grid-tile-label">screen</span></button>
+    </div>
+    <div class="quick-grid quick-grid--second">
+      <button id="btnSpeaker" class="grid-tile grid-tile--labeled" title="play the phone's audio on this Mac (like headphones)"><span class="grid-tile-icon">&#9835;</span><span class="grid-tile-label">audio link</span></button>
+      <button id="btnKeepAwake" class="grid-tile" title="keep awake (while unlocked)"><span class="grid-tile-icon">&#8734;</span></button>
       <button id="btnLocate" class="grid-tile" title="locate phone"><span class="grid-tile-icon">&#9046;</span></button>
-      <button id="btnMirror" class="grid-tile" title="remote screen"><span class="grid-tile-icon">&#10697;</span></button>
       <div id="lockRow" class="hidden">
         <button id="btnLock" class="grid-tile" title="lock phone"><span class="grid-tile-icon">&#9919;</span></button>
       </div>
-      <button id="btnCameraOpen" class="grid-tile" title="camera"><span class="grid-tile-icon">&#9678;</span></button>
+      <button id="btnCameraOpen" class="grid-tile grid-tile--labeled" title="camera"><span class="grid-tile-icon">&#9678;</span><span class="grid-tile-label">camera</span></button>
     </div>
+    <!-- Effects on the phone's audio (played on this Mac): two on/off switches,
+         8D's speed and path, and a live view of where the sound is. Turning
+         either switch on turns phone audio on. -->
     <div id="appLaunchRow" class="app-launch-row">
       <input id="appLaunchInput" list="appList" placeholder="launch an app…" />
       <datalist id="appList"></datalist>

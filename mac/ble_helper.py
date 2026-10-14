@@ -26,16 +26,19 @@ MAIN_SERVER_URL = "http://127.0.0.1:8811/internal/ble_hit"
 
 
 def decode_payload(data):
-    if len(data) != 6:
+    # ip1[, ip2, ip3] (4 bytes each, best first) then port (2 bytes); the
+    # original single-address format is just the 6-byte case, and a phone with
+    # no address at all (mobile data only) sends just the port.
+    if len(data) < 2 or (len(data) - 2) % 4 != 0:
         return None
-    ip = ".".join(str(b) for b in data[0:4])
-    port = (data[4] << 8) | data[5]
-    return ip, port
+    ips = [".".join(str(b) for b in data[i:i + 4]) for i in range(0, len(data) - 2, 4)]
+    port = (data[-2] << 8) | data[-1]
+    return ips, port
 
 
-def report_hit(ip, port):
+def report_hit(ips, port):
     try:
-        body = json.dumps({"ip": ip, "port": port}).encode("utf-8")
+        body = json.dumps({"ip": ips[0] if ips else "", "ips": ips, "port": port}).encode("utf-8")
         req = urllib.request.Request(
             MAIN_SERVER_URL, data=body,
             headers={"Content-Type": "application/json"}, method="POST",

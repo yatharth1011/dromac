@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.local.dromac.audio</string>
+  <key>CFBundleName</key><string>Dromac</string>
+  <key>CFBundleDisplayName</key><string>Dromac</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Dromac connects your headphones to this Mac so the phone's audio plays on them.</string>
+</dict>
+</plist>

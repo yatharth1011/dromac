@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "Dromac"
 include(":app")
+include(":bthelper")

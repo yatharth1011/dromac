@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- On Android 11-level targets these are normal (install-time) permissions. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+
+    <!-- Only apps signed with the same key (Dromac) may send it requests. -->
+    <permission
+        android:name="com.dromac.bthelper.ENABLE_BLUETOOTH"
+        android:protectionLevel="signature" />
+
+    <application android:label="Dromac Bluetooth helper" android:allowBackup="false">
+        <receiver
+            android:name=".EnableReceiver"
+            android:exported="true"
+            android:permission="com.dromac.bthelper.ENABLE_BLUETOOTH">
+            <intent-filter>
+                <action android:name="com.dromac.bthelper.ENABLE" />
+            </intent-filter>
+        </receiver>
+        <!-- for testing from adb only: launched with `am start`, enables and closes -->
+        <activity android:name=".TestActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay" />
+    </application>
+</manifest>

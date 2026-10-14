@@ -11,13 +11,19 @@ android {
         applicationId = "com.dromac.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Signed with the debug key on purpose: the phone already has a build
+            // signed with it, and Android only installs an update over an app with the
+            // same signature -- a new key would mean uninstalling, losing every
+            // permission and special access granted so far. Still a real release
+            // build (not debuggable, optimized).
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

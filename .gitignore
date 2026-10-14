@@ -23,3 +23,14 @@ mac/.wallpaper/
 mac/chrome-profile/
 
 .DS_Store
+
+# Runtime files the audio pipeline writes next to itself
+mac/player_cfg.json
+mac/output_latency.json
+mac/fx.json
+mac/fx_pos.json
+mac/fx_slow.log
+mac/sep.log*
+mac/now_playing.json
+mac/now_playing_art.jpg
+mac/models/

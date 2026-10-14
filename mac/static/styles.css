@@ -145,14 +145,25 @@ code {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 300px 1fr 1fr;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(290px, 1.05fr) minmax(230px, 1fr) minmax(260px, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  grid-template-areas: "now device connection";
+  grid-template-areas: "now fx device connection";
   gap: 12px;
   padding: 14px;
 }
 
 .area-now { grid-area: now; }
+.area-fx { grid-area: fx; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+/* too narrow for four columns side by side: two by two, and the page scrolls */
+@media (max-width: 1150px) and (min-width: 761px) {
+  .dashboard {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(560px, auto) minmax(560px, auto);
+    grid-template-areas: "now fx" "device connection";
+    overflow-y: auto;
+  }
+  html, body { overflow: auto; }
+}
 /* device/volume/notif and connection/quick each share one grid cell as their
    own independent vertical flex flow -- keeps the "now" card's height (which
    is naturally much taller than device+volume, or connection+quick) from
@@ -197,7 +208,8 @@ code {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  justify-content: center;
+  justify-content: safe center;
+  overflow-y: auto;
 }
 
 .art-wrap {
@@ -619,16 +631,18 @@ input[type="range"]::-moz-range-thumb {
 
 .quick-grid {
   display: flex;
-  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }
+.quick-grid--second { margin-top: 8px; }
 #lockRow { display: contents; }
 #lockRow.hidden { display: none; }
 .grid-tile {
-  width: 48px;
+  /* Tiles share the row's width evenly, so each row runs edge to edge
+     whatever the card width and however many tiles are showing. */
+  flex: 1 1 0;
+  min-width: 0;
   height: 48px;
-  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -642,6 +656,245 @@ input[type="range"]::-moz-range-thumb {
 .grid-tile:hover { border-color: var(--accent1); }
 .grid-tile:active { transform: scale(0.95); }
 .grid-tile-icon { font-size: 16px; line-height: 1; }
+/* Labeled tiles are exactly as wide as their label; the icon tiles share
+   whatever is left, so each row still runs edge to edge. */
+.grid-tile--labeled { flex: 0 0 auto; gap: 8px; padding: 0 14px; }
+.grid-tile-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- audio effects ---------- */
+.lock-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-strong); flex-wrap: wrap; }
+.lock-gap { flex: 1; }
+.lock-info {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tok-comment);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lock-info.waiting { color: var(--tok-red); }
+.fx-panel {
+  width: 100%;
+  margin-top: 10px;
+  text-align: left;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 10px;
+}
+.fx-head { display: flex; align-items: center; gap: 8px; }
+.fx-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  background: transparent;
+  color: var(--fg);
+  border: 1.5px solid var(--border-strong);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.fx-switch:hover { border-color: var(--accent1); }
+.fx-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--border-strong);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.fx-switch.on { border-color: var(--accent1); color: var(--accent1); }
+.fx-switch.on .fx-dot { background: var(--accent1); box-shadow: 0 0 8px var(--accent1); }
+#btnSlowed { margin-left: auto; }
+.fx-speed { display: inline-flex; align-items: center; gap: 2px; font-family: var(--font-mono); font-size: 11px; }
+.fx-step {
+  width: 22px; height: 22px;
+  background: transparent; color: var(--fg);
+  border: 1px solid var(--border-strong); border-radius: 6px;
+  cursor: pointer; line-height: 1;
+}
+.fx-step:hover { border-color: var(--accent1); }
+.fx-speed-val { min-width: 34px; text-align: center; color: var(--tok-comment); }
+/* the view takes whatever height the pane has left over (the switches and
+   presets below keep theirs), so the pane never needs a scrollbar */
+.fx-view-wrap { width: 100%; margin-top: 6px; transition: opacity 0.3s ease; flex: 1 1 0; min-height: 150px; max-height: 300px; display: flex; flex-direction: column; }
+/* in the now-playing pane: below the recently played, taking the room left */
+.now-playing .fx-view-wrap { margin-top: 12px; min-height: 170px; max-height: 340px; }
+.fx-view-wrap.off { opacity: 0.3; }
+.fx-view { display: block; width: 100%; flex: 1 1 0; min-height: 0; }
+.fx-panel { flex: none; }
+/* one line, always the same height: a caption that wrapped to 2-3 lines as it
+   changed made the 3D view above it resize -- and jump -- every time */
+.fx-view-caption {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--tok-comment);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fx-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(58px, 1fr)); gap: 5px; }
+.fx-mode {
+  display: flex;
+  margin-top: 10px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.fx-mode-btn {
+  flex: 1 1 0;
+  padding: 7px 0;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-left: 1px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.fx-mode-btn:first-child { border-left: none; }
+.fx-mode-btn:hover { color: var(--accent1); }
+.fx-mode-btn.on { background: var(--accent1); color: #0b0b0b; }
+.fx-mode-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 5px; }
+.fx-mode-row .fx-mode-info { flex: 1 1 100%; margin-top: 0; }
+.fx-switch--small { padding: 4px 9px; font-size: 10.5px; }
+.fx-switch--small.disabled { opacity: 0.35; pointer-events: none; }
+.fx-mode-info {
+  min-height: 14px;
+  margin-top: 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--tok-comment);
+}
+.accel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.accel-row.hidden { display: none; }
+.accel-info.bass-info { min-width: 48px; }
+/* ambience: rain and thunder */
+.ambience-block {
+  width: 100%;
+  margin-top: 10px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 10px;
+  flex: none;
+}
+.thunder-row { margin-top: 6px; }
+.fx-switch.paused { border-color: var(--accent1); color: var(--tok-comment); }
+.fx-switch.paused .fx-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--accent1); }
+.rain-row { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10.5px; }
+.rain-preset {
+  background: transparent; color: var(--fg);
+  border: 1.5px solid var(--border-strong); border-radius: 8px;
+  font-family: var(--font-mono); font-size: 10.5px; padding: 5px 6px; max-width: 120px;
+}
+.rain-preset option { background: var(--bg, #111); }
+.ambience-card.off .rain-preset { opacity: 0.6; }
+
+/* the split kit's own switches, shown only while it's on */
+.kit-opts { display: inline-flex; gap: 6px; }
+.kit-opts.hidden { display: none; }
+/* the mixer: which instruments you hear */
+.hear-row { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-family: var(--font-mono); font-size: 10.5px; }
+.hear-row .accel-label { margin-right: 3px; }
+.hear-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex: 1 1 0; justify-content: center; min-width: 0;
+  padding: 5px 6px;
+  background: transparent; color: var(--tok-comment);
+  border: 1.5px dashed var(--border-strong); border-radius: 999px;
+  font-family: var(--font-mono); font-size: 10.5px;
+  cursor: pointer; user-select: none; white-space: nowrap;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.hear-chip .hear-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); transition: background 0.15s ease; }
+.hear-chip.on { border-style: solid; border-color: var(--part); color: var(--fg); }
+.hear-chip.on .hear-dot { background: var(--part); box-shadow: 0 0 6px var(--part); }
+.hear-chip:not(.on) { text-decoration: line-through; text-decoration-color: var(--border-strong); }
+.hear-chip:hover { border-color: var(--part); }
+.hear-chip[data-part="vocals"] { --part: var(--accent1); }
+.hear-chip[data-part="drums"] { --part: #ffb347; }
+.hear-chip[data-part="bass"] { --part: #5ab0ff; }
+.hear-chip[data-part="other"] { --part: #c58bff; }
+.hear-row.nosplit .hear-chip { opacity: 0.45; }
+.hear-all {
+  padding: 5px 7px; background: transparent; color: var(--tok-comment);
+  border: 1px solid transparent; border-radius: 6px;
+  font-family: var(--font-mono); font-size: 10.5px; cursor: pointer;
+  visibility: hidden;
+}
+.hear-all.show { visibility: visible; }
+.hear-all:hover { border-color: var(--border-strong); color: var(--fg); }
+.accel-label { color: var(--tok-comment); white-space: nowrap; }
+.accel-slider { flex: 1; min-width: 60px; accent-color: var(--accent1); }
+.accel-info { min-width: 108px; text-align: right; color: var(--tok-comment); white-space: nowrap; }
+
+/* "ultramuse": the slider all the way right. Each letter rides a rainbow that
+   sweeps across the word, with a little wave and glow. */
+.ultramuse { display: inline-flex; font-weight: 700; letter-spacing: 0.02em; }
+.ultramuse span {
+  display: inline-block;
+  background: linear-gradient(90deg, #ff5f6d, #ffc371, #f9f871, #7cf29c, #4fc3f7, #a78bfa, #ff7eb6, #ff5f6d);
+  background-size: 800% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ultramuse-hue 2.4s linear infinite, ultramuse-wave 1.6s ease-in-out infinite;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.25));
+}
+@keyframes ultramuse-hue { from { background-position: 0% 50%; } to { background-position: 800% 50%; } }
+@keyframes ultramuse-wave {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+.accel-row.ultra .accel-slider { accent-color: #ff7eb6; filter: drop-shadow(0 0 6px rgba(255, 126, 182, 0.55)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ultramuse span { animation: ultramuse-hue 6s linear infinite; }
+}
+.fx-group-label {
+  margin: 10px 0 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--tok-comment);
+}
+.fx-preset {
+  min-width: 0;
+  padding: 7px 0;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.fx-preset:hover { border-color: var(--accent1); }
+.fx-preset.on { background: var(--accent1); border-color: var(--accent1); color: #0b0b0b; }
+.fx-preset--auto { border-color: rgba(167, 139, 250, 0.6); }
+.fx-preset--auto.on { background: linear-gradient(90deg, #a78bfa, #4fc3f7); border-color: transparent; color: #0b0b0b; }
+.fx-panel.off .fx-preset.on { background: transparent; color: var(--accent1); }
 
 .app-launch-row {
   display: flex;
@@ -1122,6 +1375,7 @@ input[type="range"]::-moz-range-thumb {
     grid-template-rows: auto;
     grid-template-areas:
       "now"
+      "fx"
       "device"
       "connection";
     overflow-y: auto;

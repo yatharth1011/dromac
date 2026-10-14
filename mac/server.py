@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Dromac backend: talks to the Dromac companion app on the phone over plain HTTP
-(no adb / USB / ADB wireless debugging involved) and serves the dashboard."""
+(Wi-Fi normally; over a USB cable via adb forward when Wi-Fi can't reach it) and serves the dashboard."""
 
 import difflib
 import hashlib
@@ -11,6 +11,7 @@ import mimetypes
 import os
 import plistlib
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -445,6 +446,21 @@ def save_state(state):
         STATE_FILE.write_text(json.dumps(state))
 
 
+# Set whenever a method above the ring scan (USB, beacon, gateway, mDNS)
+# connects, so a scan in progress stops within one probe instead of grinding
+# on, and can never overwrite that better link with its own find.
+_better_link_found = threading.Event()
+
+
+def link_found(state):
+    save_state(state)
+    threading.Thread(target=restore_phone_bt_if_owed, daemon=True).start()
+    _last_status["connected"] = True
+    _last_status["checked_at"] = time.time()
+    if state.get("method") != "scan":
+        _better_link_found.set()
+
+
 def phone_base_url():
     state = load_state()
     host = state.get("phone_host")
@@ -487,6 +503,8 @@ def is_phone_connected():
         return False
     data, err = phone_request("GET", "/api/state", timeout=3)
     ok = data is not None
+    if ok:
+        follow_phone_link(data)
     _last_status["connected"] = ok
     _last_status["checked_at"] = time.time()
     if ok:
@@ -556,6 +574,8 @@ def local_network():
 
 
 def probe_dromac(ip, port=PHONE_PORT_DEFAULT, timeout=0.35):
+    if os.environ.get("DROMAC_NO_WIFI") and ip != "127.0.0.1":  # for testing the fallbacks
+        return False
     try:
         req = urllib.request.Request(f"http://{ip}:{port}/api/state")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -611,38 +631,1290 @@ _last_scan_attempt = 0
 RESCAN_INTERVAL = 20  # seconds between automatic rescans while disconnected
 
 
+# ---------- ring scan (last resort) ----------
+# Probes every address on the Wi-Fi for Dromac, nearest to the Mac's own
+# address first ("innermost ring"), widening out to the whole subnet and then
+# larger blocks (up to a /16). Only runs on its own once USB, the beacon's
+# addresses, the gateway and mDNS have all failed for a while, stops the
+# moment the phone answers, and rests between full passes.
+SCAN_AFTER_DISCONNECTED = 30   # seconds of nothing else working before scanning
+SCAN_REST = 300                # seconds between full passes that found nothing
+SCAN_WORKERS = 128
+SCAN_MAX_PREFIX = 16
+_disconnected_since = None
+_scan_running = False
+_last_full_scan = 0
+
+
+def ring_order(own_ip):
+    """Addresses around own_ip, nearest first: the Mac's own subnet, then each
+    wider block's new addresses, again nearest first."""
+    own = ipaddress.ip_address(own_ip)
+    seen = set()
+    blocks = []
+    net = local_network()
+    if net:
+        blocks.append(net)
+    prefix = (net.prefixlen if net else 24) - 1
+    while prefix >= SCAN_MAX_PREFIX:
+        blocks.append(ipaddress.ip_network(f"{own_ip}/{prefix}", strict=False))
+        prefix -= 1
+    for block in blocks:
+        hosts = [h for h in block.hosts() if h != own and h not in seen]
+        hosts.sort(key=lambda h: abs(int(h) - int(own)))
+        seen.update(hosts)
+        for h in hosts:
+            yield str(h)
+
+
+def ring_scan():
+    """Returns the phone's address, or None. Gives up early if something else
+    reconnects in the meantime."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    own = local_ip()
+    if not own:
+        return None
+    print(f"[scan] ring scan starting around {own}", file=sys.stderr)
+    _better_link_found.clear()
+    order = ring_order(own)
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        while True:
+            batch = [ip for _, ip in zip(range(SCAN_WORKERS * 4), order)]
+            if not batch:
+                break
+            if _better_link_found.is_set():
+                print("[scan] stopped: a higher-priority link connected", file=sys.stderr)
+                return None
+            futures = {pool.submit(probe_dromac, ip): ip for ip in batch}
+            for f in as_completed(futures):
+                if _better_link_found.is_set():
+                    for other in futures:
+                        other.cancel()
+                    print("[scan] stopped: a higher-priority link connected", file=sys.stderr)
+                    return None
+                if f.result():
+                    for other in futures:
+                        other.cancel()
+                    return futures[f]
+    print("[scan] ring scan finished, phone not found", file=sys.stderr)
+    return None
+
+
+def maybe_ring_scan():
+    """Kicks off a background ring scan when it's the only option left."""
+    global _scan_running, _last_full_scan
+    now = time.time()
+    if _scan_running or _disconnected_since is None:
+        return
+    if now - _disconnected_since < SCAN_AFTER_DISCONNECTED or now - _last_full_scan < SCAN_REST:
+        return
+    _scan_running = True
+
+    def run():
+        global _scan_running, _last_full_scan
+        try:
+            ip = ring_scan()
+            if ip and not _better_link_found.is_set():
+                print(f"[scan] found the phone at {ip}", file=sys.stderr)
+                link_found({"phone_host": ip, "phone_port": PHONE_PORT_DEFAULT, "last_connected": time.time(), "method": "scan"})
+            elif not ip:
+                _last_full_scan = time.time()
+        finally:
+            _scan_running = False
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+# ---------- Bluetooth data link (3rd choice) ----------
+# ble_link.py relays HTTP to the phone over a Bluetooth LE connection and
+# listens on 127.0.0.1:BT_LINK_PORT, so the phone looks like one more address.
+# Tried (in the background, it can take ~15 s to find and connect) only once
+# USB and Wi-Fi have failed; the ring scan waits until this has failed too.
+# Wi-Fi and USB still take over from it the moment they work (see
+# handle_ble_hit and the watchdog). Needs the pairing key, which the phone
+# only hands out over the cable.
+BT_LINK_PORT = 18823
+BT_LINK_PATH = ROOT / "ble_link.py"
+BLE_KEY_FILE = ROOT / "ble_key"
+BT_RETRY_INTERVAL = 20
+_bt_running = False
+_bt_last_try = 0
+_bt_last_failed = False
+
+
+def fetch_ble_key():
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{USB_LOCAL_PORT}/api/ble_key", timeout=3) as resp:
+            key = json.loads(resp.read().decode("utf-8")).get("key")
+        if key and (not BLE_KEY_FILE.exists() or BLE_KEY_FILE.read_text().strip() != key):
+            BLE_KEY_FILE.write_text(key)
+            os.chmod(BLE_KEY_FILE, 0o600)
+            print("[bt] saved the Bluetooth pairing key from the phone", file=sys.stderr)
+    except Exception:
+        pass  # older phone app without the link
+
+
+def bluetooth_link_pending():
+    """True while the Bluetooth link is still worth waiting for (so the ring scan holds off)."""
+    return _bt_running or not _bt_last_failed
+
+
+def maybe_bluetooth():
+    global _bt_running, _bt_last_try
+    now = time.time()
+    if _bt_running or now - _bt_last_try < BT_RETRY_INTERVAL:
+        return
+    if not BLE_KEY_FILE.exists():
+        _set_bt_failed(True)
+        return
+    _bt_running = True
+    _bt_last_try = now
+
+    def run():
+        global _bt_running
+        try:
+            if probe_dromac("127.0.0.1", BT_LINK_PORT, timeout=30) and not _better_link_found.is_set():
+                print("[bt] connected over the Bluetooth data link", file=sys.stderr)
+                link_found({"phone_host": "127.0.0.1", "phone_port": BT_LINK_PORT, "last_connected": time.time(), "method": "bluetooth"})
+                _set_bt_failed(False)
+            else:
+                _set_bt_failed(True)
+        finally:
+            _bt_running = False
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _set_bt_failed(failed):
+    global _bt_last_failed
+    _bt_last_failed = failed
+
+
+def bt_link_supervisor():
+    """Keeps ble_link.py running (it holds no connection until asked)."""
+    if os.environ.get("DROMAC_NO_BLE") or not BT_LINK_PATH.exists():
+        return
+    while True:
+        try:
+            proc = subprocess.Popen([sys.executable, str(BT_LINK_PATH)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            code = proc.wait()
+            if code != 0:
+                print(f"[bt] ble_link.py exited with code {code}, respawning in 5s", file=sys.stderr)
+        except Exception as e:
+            print(f"[bt] failed to spawn ble_link.py: {e}", file=sys.stderr)
+        time.sleep(5)
+
+
+# ---------- phone audio on the Mac speakers ----------
+# The Mac becomes the phone's speaker, like plugging in headphones: scrcpy's
+# "output" audio source (run over adb, so no screen-capture permission on the
+# phone) takes the phone's whole audio output, silences the phone's own
+# speaker, and plays it on whatever this Mac is outputting to (built-in
+# speakers, AirPods, Bluetooth speakers, AirPlay, a Multi-Output Device).
+# Same priority idea as the control link, but adb only runs over a cable or
+# the network:
+#   1. USB cable      -> raw PCM (lossless, lowest delay)
+#   2. Wi-Fi (adb)    -> FLAC (lossless, about half the data)
+# and it moves back up to the cable the moment it's plugged in. The Bluetooth
+# link can't carry adb, so audio needs one of those two.
+ADB_TCP_PORT = 5555
+SCRCPY_CANDIDATES = ("/opt/homebrew/bin/scrcpy", "/usr/local/bin/scrcpy")
+_audio_on = False
+_audio_thread = None
+_audio_status = {"on": False, "route": None, "error": None}
+
+# Effects (dromac_fx.py): {"8d": preset name or None, "slowed": bool}. With
+# none on, audio takes scrcpy's own direct path (lowest delay); with any on,
+# scrcpy hands raw audio to dromac_fx.py, which feeds the dromac-audio player.
+# Presets are switched live through FX_FILE, so changing them is gapless.
+FX_FILE = ROOT / "fx.json"
+FX_SCRIPT = ROOT / "dromac_fx.py"
+AUDIO_PLAYER_SRC = ROOT / "dromac_audio.swift"
+AUDIO_PLAYER_PLIST = ROOT / "dromac_audio.plist"
+NOW_PLAYING_FILE = ROOT / "now_playing.json"
+ARTWORK_FILE = ROOT / "now_playing_art.jpg"
+AUDIO_PLAYER_BIN = ROOT / "dromac-audio"
+HEAD_SRC = ROOT / "dromac_head.swift"          # head tracking (camera), run by dromac_fx.py
+HEAD_PLIST = ROOT / "dromac_head.plist"
+HEAD_BIN = ROOT / "dromac-head"
+FX_POS_FILE = ROOT / "fx_pos.json"
+FX_8D_PRESETS = ("orbit", "helix", "loop", "infinity", "saddle", "knot", "lissajous", "breathe", "gyro", "swing", "wander", "lorenz", "stage", "still", "auto")
+FX_MODES = ("8d", "dsp", "ai")  # whole song moves / live instrument split / AI instrument split
+# 8d_on / slowed are the two on-off switches; "8d" remembers the chosen path
+# even while 8D is off, so switching it back on resumes the same one.
+_fx = {"8d_on": False, "8d": "orbit", "speed": 1.0, "slowed": False, "mode": "8d", "vocals": True,
+       "accel": 50}  # ai split: % of the GPU to use -- more GPU, less delay (80 = "ultramuse")
+HEAR_PARTS = ("vocals", "drums", "bass", "other")
+AUDIO_PREFS_FILE = ROOT / "audio_prefs.json"
+try:
+    _fx.update(json.loads(AUDIO_PREFS_FILE.read_text()).get("fx", {}))
+except Exception:
+    pass
+
+
+def save_audio_prefs():
+    try:
+        AUDIO_PREFS_FILE.write_text(json.dumps({"on": _audio_on, "fx": _fx}))
+    except Exception:
+        pass
+
+
+def restore_audio():
+    """Audio that was on before a restart comes back on. With headphones only
+    set, the phone paused itself in the meantime; if that was just now, play
+    again once the Mac has the audio back."""
+    global _paused_for_lock
+    try:
+        if not json.loads(AUDIO_PREFS_FILE.read_text()).get("on"):
+            return
+    except Exception:
+        return
+    data, _ = phone_request("GET", "/api/state", timeout=3)
+    if (data or {}).get("audioLink") is False:
+        return  # switched off on the phone: stay off
+    ago = (data or {}).get("spillPausedAgoMs", -1)
+    if 0 <= ago < 60_000:
+        _paused_for_lock = True
+    set_audio(True)
+
+
+def fx_active():
+    return bool(_fx.get("8d_on") or _fx.get("slowed") or _fx.get("mode") in ("dsp", "ai")
+                or (_fx.get("rain") or {}).get("on"))
+
+
+RAIN_PRESETS = ("storm cycle", "drizzle", "steady", "downpour", "thunderstorm", "distant storm",
+                "tin roof", "window", "forest")
+
+
+# "Headphones only": the phone's audio may play on these headphones and nowhere
+# else. On the Mac, the player goes silent instead of following macOS to its
+# own speakers (dromac_audio.swift); on the phone, SpillGuard pauses the music
+# rather than let it out of the phone's speaker. Persisted across restarts.
+LOCK_FILE = ROOT / "headphones_lock.json"
+BUILTIN_OUTPUTS = ("MacBook Pro Speakers", "MacBook Air Speakers", "Mac mini Speakers", "iMac Speakers",
+                   "Built-in Output", "Mac Studio Speakers")
+try:
+    _lock = json.loads(LOCK_FILE.read_text())
+except Exception:
+    _lock = {"on": False, "device": None}
+_paused_for_lock = False
+
+
+def save_lock():
+    LOCK_FILE.write_text(json.dumps(_lock))
+
+
+def mac_output_name():
+    try:
+        return subprocess.run([ensure_audio_player(), "--current-output"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+
+def use_own_player():
+    """Always Dromac's own path (effects process + player), even with every
+    effect off: switching to scrcpy's own player and back on each toggle meant
+    tearing the whole audio chain down -- the sound cut out every time 8D was
+    switched. One path: toggles are instant, and the cushion (seamless cable
+    switches), the headphone buttons and Now Playing work in every mode."""
+    return True
+
+
+def set_lock(on):
+    if on:
+        device = mac_output_name()
+        if not device or device in BUILTIN_OUTPUTS:
+            return "connect your headphones to the Mac first, then turn this on"
+        _lock.update(on=True, device=device)
+    else:
+        _lock.update(on=False)
+    save_lock()
+    phone_request("POST", "/api/audio/guard", {"on": bool(_lock["on"]), "device": _lock.get("device") or ""}, timeout=3)
+    return None
+
+
+def fx_position_any():
+    """The effects process's last report, however old."""
+    try:
+        return json.loads(FX_POS_FILE.read_text())
+    except Exception:
+        return None
+
+
+def fx_position():
+    """The effects process's latest report of where the sound is (fresh only)."""
+    try:
+        data = json.loads(FX_POS_FILE.read_text())
+        return data if time.time() - data.get("t", 0) < 2 else None
+    except Exception:
+        return None
+
+
+def write_fx():
+    tmp = FX_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_fx))
+    tmp.replace(FX_FILE)
+
+
+def ensure_head_tracker():
+    """Builds dromac-head if it's missing or older than its source. Never fatal:
+    without it, head tracking just stays off."""
+    try:
+        if HEAD_BIN.exists() and HEAD_BIN.stat().st_mtime >= HEAD_SRC.stat().st_mtime:
+            return
+        cmd = ["swiftc", "-O", str(HEAD_SRC), "-o", str(HEAD_BIN),
+               "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", str(HEAD_PLIST)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            print("[head] couldn't build the head tracker:", (result.stderr.strip().splitlines() or ["?"])[-1], flush=True)
+    except Exception as e:
+        print("[head] couldn't build the head tracker:", e, flush=True)
+
+
+def ensure_audio_player():
+    ensure_head_tracker()
+    if AUDIO_PLAYER_BIN.exists() and AUDIO_PLAYER_BIN.stat().st_mtime >= AUDIO_PLAYER_SRC.stat().st_mtime:
+        return str(AUDIO_PLAYER_BIN)
+    cmd = ["swiftc", "-O", str(AUDIO_PLAYER_SRC), "-o", str(AUDIO_PLAYER_BIN)]
+    if AUDIO_PLAYER_PLIST.exists():  # a bundle id, so macOS will make it the Now Playing app
+        cmd += ["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", str(AUDIO_PLAYER_PLIST)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError("couldn't build the audio player: " + (result.stderr.strip().splitlines() or ["swiftc failed"])[-1])
+    return str(AUDIO_PLAYER_BIN)
+
+
+def find_scrcpy():
+    found = shutil.which("scrcpy")
+    if found:
+        return found
+    return next((p for p in SCRCPY_CANDIDATES if os.access(p, os.X_OK)), None)
+
+
+def adb_devices():
+    """[(serial, state)] from `adb devices`."""
+    adb = find_adb()
+    if not adb:
+        return []
+    try:
+        out = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=4).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            rows.append((parts[0], parts[1]))
+    return rows
+
+
+def usb_serial():
+    """The phone over the cable (network adb entries are "ip:port")."""
+    for serial, st in adb_devices():
+        if st == "device" and ":" not in serial and "._adb-tls" not in serial:
+            return serial
+    return None
+
+
+WIFI_IP_FILE = ROOT / "phone_wifi_ip"
+
+
+def remember_wifi_ip(data):
+    """The phone reports its addresses (the Wi-Fi it's joined, and its own
+    hotspot); remembering them is what lets the Mac move to Wi-Fi the moment
+    the cable goes -- without the Bluetooth beacon, which is off while the Mac
+    has the headphones."""
+    ips = [ip for ip in ((data or {}).get("ips") or [(data or {}).get("wifiIp")]) if ip and not str(ip).startswith("127.")]
+    if ips:
+        try:
+            text = "\n".join(ips)
+            if not WIFI_IP_FILE.exists() or WIFI_IP_FILE.read_text().strip() != text:
+                WIFI_IP_FILE.write_text(text)
+        except Exception:
+            pass
+
+
+def known_wifi_ips():
+    try:
+        return [l.strip() for l in WIFI_IP_FILE.read_text().splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def known_wifi_ip():
+    """The best remembered address from here: on the phone's hotspot, the
+    phone is the Mac's gateway; otherwise the Wi-Fi address it reported."""
+    ips = known_wifi_ips()
+    gw = default_gateway()
+    if gw and gw in ips:
+        return gw
+    return ips[0] if ips else None
+
+
+def reachable(ip, port, timeout=0.7):
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def phone_wifi_ips():
+    """Every address the phone might be reached on over the network, best
+    first: the Mac's gateway if that's the phone (Mac on its hotspot), the
+    addresses it reported, the beacon's, and where the control link found it."""
+    gw = default_gateway()
+    with _ble_lock:
+        ips = known_wifi_ips() + list(_ble_last_ips)
+    state = load_state()
+    if state.get("method") in ("ble", "gateway", "mdns", "scan", "manual", "wifi") and state.get("phone_host"):
+        ips.append(state["phone_host"])
+    ordered = ([gw] if gw and gw in ips else []) + ips
+    seen, out = set(), []
+    for ip in ordered:
+        if ip and not ip.startswith("127.") and ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return out
+
+
+def phone_wifi_ip():
+    ips = phone_wifi_ips()
+    return ips[0] if ips else None
+
+
+def enable_adb_over_wifi(serial):
+    """While on the cable, make the phone's adb also listen on the network so
+    audio can carry on over Wi-Fi after unplugging. adb over the network still
+    needs this Mac's key, which the phone already trusts from the cable. Lasts
+    until the phone reboots; done only when audio is on."""
+    adb = find_adb()
+    try:
+        port = subprocess.run([adb, "-s", serial, "shell", "getprop", "service.adb.tcp.port"],
+                              capture_output=True, text=True, timeout=4).stdout.strip()
+        if port != str(ADB_TCP_PORT):
+            # Restarts the phone's adb, so the cable drops for a second or two;
+            # the control link and BlazingNet reconnect on their own.
+            subprocess.run([adb, "-s", serial, "tcpip", str(ADB_TCP_PORT)], capture_output=True, timeout=8)
+            time.sleep(3)
+    except Exception:
+        pass
+
+
+def wifi_serial():
+    """Connect adb to the phone over the network (its Wi-Fi address, or its
+    hotspot address when the Mac is on the hotspot); returns the serial."""
+    adb = find_adb()
+    if not adb:
+        return None
+    devices = adb_devices()
+    candidates = phone_wifi_ips()
+    for ip in candidates:                       # already connected on one of them?
+        if (f"{ip}:{ADB_TCP_PORT}", "device") in devices:
+            return f"{ip}:{ADB_TCP_PORT}"
+    for ip in candidates:
+        if reachable(ip, ADB_TCP_PORT):         # don't wait on an address that can't work from here
+            serial = _adb_connect(adb, ip)
+            if serial:
+                return serial
+    return None
+
+
+def _adb_connect(adb, ip):
+    serial = f"{ip}:{ADB_TCP_PORT}"
+    for attempt in range(2):
+        try:
+            subprocess.run([adb, "connect", serial], capture_output=True, text=True, timeout=6)
+        except Exception:
+            return None
+        if (serial, "device") in adb_devices():
+            return serial
+        if attempt == 0 and not _restart_adb_server_if_blocked(ip):
+            break
+    return None
+
+
+_last_adb_restart = 0
+
+
+def _restart_adb_server_if_blocked(ip):
+    """The adb server is a background daemon that keeps the network rights of
+    whichever app happened to start it. Started from somewhere without macOS's
+    Local Network permission (a launchd job, say), every `adb connect` fails
+    with "No route to host" even though the phone is right there. If this
+    process can reach the phone's adb port itself, restart the server from
+    here, where the permission is in place. At most once a minute."""
+    global _last_adb_restart
+    if time.time() - _last_adb_restart < 60:
+        return False
+    try:
+        with socket.create_connection((ip, ADB_TCP_PORT), timeout=2):
+            pass
+    except Exception:
+        return False  # genuinely unreachable; restarting wouldn't help
+    _last_adb_restart = time.time()
+    adb = find_adb()
+    print("[audio] adb server can't reach the network; restarting it from Dromac", file=sys.stderr)
+    try:
+        subprocess.run([adb, "kill-server"], capture_output=True, timeout=6)
+        subprocess.run([adb, "start-server"], capture_output=True, timeout=10)
+    except Exception:
+        return False
+    return True
+
+
+def drop_wifi_adb():
+    adb = find_adb()
+    for serial, _ in adb_devices():
+        if serial.endswith(f":{ADB_TCP_PORT}"):
+            try:
+                subprocess.run([adb, "disconnect", serial], capture_output=True, timeout=4)
+            except Exception:
+                pass
+
+
+# The long-lived half of the audio path: the pipe scrcpy writes into, the
+# effects/AI process reading it, and the player. It outlives any one capture,
+# so when the route changes (cable out -> Wi-Fi) only scrcpy restarts: the AI
+# keeps its model and buffer, the player keeps playing.
+_pipe = None
+_capture_lost_at = None   # when the last capture died (to time route changes)
+# The player's own queue. Wi-Fi jitter is now absorbed by the effects' cushion
+# upstream, so this only needs to keep the device fed: small, so a click
+# (vocals, a preset) is heard quickly.
+PIPE_BUFFER_MS = 100
+
+
+def ensure_pipeline():
+    global _pipe
+    locked = _lock["device"] if _lock.get("on") else ""
+    if _pipe and _pipe["locked"] == locked and all(p.poll() is None for p in (_pipe["fx"], _pipe["player"])):
+        return _pipe
+    stop_pipeline()
+    player_bin = ensure_audio_player()
+    try:
+        FX_POS_FILE.unlink()   # a new effects process counts captures from 0 again
+    except FileNotFoundError:
+        pass
+    fifo = ROOT / "phone_audio.wav"
+    try:
+        fifo.unlink()
+    except FileNotFoundError:
+        pass
+    os.mkfifo(fifo)
+    write_fx()
+    # effects -> player over a socket pair with small buffers (~0.08 s): a pipe
+    # holds up to 64 KB (~0.33 s), all of it delay between a change and hearing it
+    fx_end, player_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    fx_end.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
+    player_end.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+    player = subprocess.Popen([player_bin, str(PIPE_BUFFER_MS // 20), locked], stdin=player_end.fileno())
+    effects = subprocess.Popen([sys.executable, str(FX_SCRIPT), str(fifo), str(FX_FILE)],
+                               stdout=fx_end.fileno(), stderr=subprocess.PIPE)
+    fx_end.close()        # each process owns its end now
+    player_end.close()
+    # Start capturing only once the effects are built (see dromac_fx.py), or the
+    # audio queued meanwhile would stay as delay.
+    import select
+    ready, _, _ = select.select([effects.stderr], [], [], 20)
+    if not ready or not effects.stderr.readline().startswith(b"ready"):
+        for p in (effects, player):
+            p.kill()
+        return None
+    _pipe = {"fifo": fifo, "fx": effects, "player": player, "locked": locked}
+    return _pipe
+
+
+def stop_pipeline():
+    global _pipe
+    if not _pipe:
+        return
+    for p in (_pipe["fx"], _pipe["player"]):
+        if p.poll() is None:
+            p.terminate()
+    for p in (_pipe["fx"], _pipe["player"]):
+        try:
+            p.wait(timeout=3)
+        except Exception:
+            p.kill()
+    try:
+        _pipe["fifo"].unlink()
+    except FileNotFoundError:
+        pass
+    _pipe = None
+
+
+def _play(scrcpy, serial, route):
+    """Runs one capture until scrcpy exits, audio is switched off, the cable
+    comes back (when on Wi-Fi), or effects/lock are switched (which needs the
+    other path)."""
+    with_fx = use_own_player()
+    # Dromac's own player (effects / headphones only) takes the raw stream on
+    # any link -- scrcpy can only hand raw audio to a WAV pipe. Lossless either
+    # way; raw is ~1.5 Mbps, easy for Wi-Fi. scrcpy's own player gets FLAC on
+    # Wi-Fi (half the data, still lossless).
+    codec = "raw" if (route == "usb" or with_fx) else "flac"
+    # How far behind live the Mac plays. Campus Wi-Fi's delay swings by 100 ms+
+    # from one moment to the next; with a buffer smaller than that the audio
+    # runs dry and scrcpy skips samples to catch up -- the clicks. 300 ms rides
+    # that out (measured: no underflows); the cable is steady, so it can stay close.
+    buffer_ms = 80 if route == "usb" else 300
+    started_at = time.time()
+    base = [scrcpy, "-s", serial, "--no-video", "--no-control", "--no-window",
+            "--audio-source=output", f"--audio-codec={codec}"]
+    if route != "usb":
+        # over Wi-Fi debugging, scrcpy's "adb reverse" tunnel is unreliable (it was
+        # torn down within 0.1 s, so the first capture after unplugging failed);
+        # a forward tunnel works first time
+        base.append("--force-adb-forward")
+    pipe = None
+    # a capture left running on the phone by the previous route (the cable was
+    # pulled before it could stop) would block this one: clear it first
+    try:
+        subprocess.run([find_adb(), "-s", serial, "shell", "pkill", "-f", "com.genymobile.scrcpy.Server"],
+                       capture_output=True, timeout=3)
+    except Exception:
+        pass
+    if with_fx:
+        pipe = ensure_pipeline()
+        if not pipe:
+            _audio_status.update(error="audio effects failed to start")
+            time.sleep(3)
+            return
+        proc = subprocess.Popen(base + ["--no-audio-playback", f"--record={pipe['fifo']}", "--record-format=wav"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    else:
+        stop_pipeline()
+        proc = subprocess.Popen(base + [f"--audio-buffer={buffer_ms}", "--audio-output-buffer=10"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    _audio_status.update(route=route, codec=codec, error=None)
+    print(f"[audio] playing over {route} ({codec}{', effects' if with_fx else ''})", file=sys.stderr)
+
+    seq0 = (fx_position_any() or {}).get("capture_seq", 0)
+
+    def resume_after_route_change():
+        # The route just changed (cable out -> Wi-Fi, or back): the phone paused
+        # itself so nothing came out of its speaker in between. Once this capture
+        # is up, play on -- the cushion covers the moment it took. Keeps trying
+        # for a few seconds, and goes straight to the phone's Wi-Fi address if
+        # the control link still points at the cable that's just been pulled.
+        # wait until this capture's audio is actually arriving -- the phone's
+        # audio goes to it from then on; resuming before that sent the music to
+        # the phone's speaker for a moment (and the phone rightly paused again)
+        if with_fx:
+            until = time.time() + 8
+            while time.time() < until and (fx_position_any() or {}).get("capture_seq", 0) <= seq0:
+                if proc.poll() is not None or not _audio_on:
+                    return
+                time.sleep(0.1)
+            time.sleep(0.2)
+        else:
+            time.sleep(1.5)
+        deadline = time.time() + 6
+        while time.time() < deadline and proc.poll() is None and _audio_on:
+            data, via = phone_request("GET", "/api/state", timeout=1.5), None
+            data = data[0]
+            if data is None and route != "usb" and known_wifi_ip():
+                via = f"http://{known_wifi_ip()}:{PHONE_PORT_DEFAULT}"
+                try:
+                    with urllib.request.urlopen(via + "/api/state", timeout=1.5) as r:
+                        data = json.loads(r.read().decode("utf-8"))
+                except Exception:
+                    data = None
+            if data is None:
+                time.sleep(0.4)
+                continue
+            ago = data.get("spillPausedAgoMs", -1)
+            if 0 <= ago < 15000:
+                if via:
+                    req = urllib.request.Request(via + "/api/media/resume_paused", data=b"{}", method="POST",
+                                                 headers={"Content-Type": "application/json"})
+                    try:
+                        urllib.request.urlopen(req, timeout=3).read()
+                    except Exception:
+                        time.sleep(0.4)
+                        continue
+                    reply = "sent over Wi-Fi"
+                else:
+                    reply = phone_request("POST", "/api/media/resume_paused", timeout=3)
+                took = f", {time.time() - _capture_lost_at:.1f} s after the old capture died" if _capture_lost_at else ""
+                print(f"[audio] resume after the route change (phone paused {ago} ms ago{took}): {reply}", file=sys.stderr)
+            return
+    threading.Thread(target=resume_after_route_change, daemon=True).start()
+    last_phone_check = 0
+    last_standby = 0
+    player_exit = None
+    try:
+        while _audio_on and proc.poll() is None:
+            if pipe and pipe["player"].poll() is not None:
+                player_exit = pipe["player"].poll()
+                break
+            time.sleep(0.5)
+            if time.time() - last_phone_check > 2:
+                last_phone_check = time.time()
+                data, _ = phone_request("GET", "/api/state", timeout=2)
+                remember_wifi_ip(data)
+                follow_phone_link(data)
+                update_now_playing(data)
+                if route == "usb" and time.time() - last_standby > 30:
+                    last_standby = time.time()
+                    # keep a Wi-Fi debugging connection ready alongside the cable,
+                    # so audio can move straight onto it if the cable goes
+                    threading.Thread(target=wifi_serial, daemon=True).start()
+                if _lock.get("on") and data and _lock.get("device") in (data.get("phoneHeadphones") or []):
+                    phone_bt(False)  # it would play its silence to them instead of the Mac
+            if use_own_player() != with_fx or (pipe and pipe["locked"] != (_lock["device"] if _lock.get("on") else "")):
+                print("[audio] effects/lock switched, changing path", file=sys.stderr)
+                break
+            if route != "usb" and usb_serial():
+                print("[audio] cable plugged in, moving audio onto it", file=sys.stderr)
+                break
+        if player_exit == 3:
+            headphones_left_mac()
+        elif player_exit == 4:
+            # the Mac is going to sleep: give the phone its headphones back now
+            print("[audio] Mac going to sleep; handing the headphones to the phone", file=sys.stderr)
+            give_headphones_back_to_phone()
+    finally:
+        crashed = proc.poll() is not None and _audio_on and player_exit is None
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+        if player_exit is not None or not _audio_on or use_own_player() != with_fx:
+            stop_pipeline()   # the player's gone, audio's off, or the other path is needed
+        if crashed:
+            globals()["_capture_lost_at"] = time.time()
+            err = (proc.stderr.read() or "").strip().splitlines()
+            print(f"[audio] scrcpy stopped ({route}): " + (" | ".join(err[-4:]) if err else str(proc.returncode)), file=sys.stderr)
+            if time.time() - started_at < 5:
+                time.sleep(1)  # failing straight away: don't flap the audio on and off
+
+
+# ---- who gets the headphones: the Mac first ----
+# With the headphones on both (multipoint), they listen to whichever device
+# streams -- and the phone streams silence while Dromac has its audio, so you'd
+# hear nothing. So while the Mac plays them, the phone's Bluetooth is off; it's
+# switched back on whenever the Mac lets the headphones go, so the phone can
+# reconnect to them and carry on. Never while the control link itself is the
+# Bluetooth one.
+
+_np_art_key = None
+
+
+def update_now_playing(data):
+    """Song info for the Mac's Now Playing (read by dromac-audio), and the
+    phone's pauses/plays for the instant hold -- from one phone state fetch."""
+    global _np_art_key
+    np = (data or {}).get("now_playing")
+    if not np:
+        return
+    if "playing" in np:
+        note_phone_playing(bool(np["playing"]))
+    note_track(np)
+    pos = fx_position() or {}
+    key = f"{np.get('title')}::{np.get('artist')}"
+    if np.get("hasArt") and key != _np_art_key:
+        raw, _ = phone_request("GET", "/api/artwork", timeout=4, binary=True)
+        if raw:
+            ARTWORK_FILE.write_bytes(raw)
+            _np_art_key = key
+    info = {
+        "title": np.get("title"), "artist": np.get("artist"), "playing": bool(np.get("playing")),
+        "duration_ms": float(np.get("duration") or 0),
+        "position_ms": max(0.0, float(np.get("position") or 0) - float(pos.get("delay_ms") or 0)),
+        "artwork": str(ARTWORK_FILE) if _np_art_key == key else None,
+    }
+    try:
+        tmp = NOW_PLAYING_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(info))
+        tmp.replace(NOW_PLAYING_FILE)
+    except Exception:
+        pass
+
+
+def adb_any_serial():
+    serial = usb_serial()
+    if serial:
+        return serial
+    return next((sr for sr, st in adb_devices() if st == "device" and sr.endswith(f":{ADB_TCP_PORT}")), None)
+
+
+def phone_bt(on):
+    if not on and load_state().get("method") == "bluetooth":
+        return  # that would cut the very link we're talking over
+    serial, adb = adb_any_serial(), find_adb()
+    if not serial or not adb:
+        return
+    try:
+        subprocess.run([adb, "-s", serial, "shell", "cmd", "bluetooth_manager", "enable" if on else "disable"],
+                       capture_output=True, timeout=8)
+    except Exception:
+        return
+    _lock["phone_bt_off"] = not on
+    save_lock()
+    # tell the phone too: if the Mac then goes quiet with its Bluetooth still
+    # off, the phone offers to turn it back on (see SpillGuard.btOffByMac)
+    phone_request("POST", "/api/audio/bt_by_mac", {"off": not on}, timeout=3)
+    print(f"[audio] phone Bluetooth {'on: it can take the headphones' if on else 'off: the headphones are the Mac’s'}", file=sys.stderr)
+
+
+def phone_has_locked():
+    data, _ = phone_request("GET", "/api/state", timeout=2)
+    return bool(data and _lock.get("device") in (data.get("phoneHeadphones") or []))
+
+
+def mac_connect_locked():
+    """Ask this Mac to connect the headphones (they must be paired with it)."""
+    try:
+        out = subprocess.run([ensure_audio_player(), "--connect", _lock.get("device", "")],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+    except Exception:
+        return False
+    return out == "connected"
+
+
+def give_headphones_back_to_phone():
+    if _lock.get("phone_bt_off"):
+        phone_bt(True)
+
+
+def restore_phone_bt_if_owed():
+    """Bluetooth that Dromac switched off is switched back on as soon as the
+    Mac can reach the phone again -- if it couldn't at the time (no cable, no
+    Wi-Fi debugging), the phone stayed without Bluetooth: no beacon, so on a
+    new network the Mac couldn't even find it."""
+    if _lock.get("phone_bt_off") and not (_audio_on and _lock.get("on")):
+        phone_bt(True)
+
+
+def headphones_left_mac():
+    """The locked headphones dropped off the Mac: the player has already gone
+    silent. Hand the audio back to the phone -- which plays it on the same
+    headphones if they're connected to it too (multipoint) -- and if they
+    aren't, pause first so the phone's speaker never gets a note of it."""
+    global _paused_for_lock
+    print(f"[audio] {_lock.get('device')} left the Mac; handing audio back to the phone", file=sys.stderr)
+    data, _ = phone_request("GET", "/api/state", timeout=2)
+    phone_has_headphones = bool(data and data.get("phoneHeadphones"))
+    if not phone_has_headphones:
+        _, err = phone_request("POST", "/api/media/pause", timeout=2)
+        _paused_for_lock = err is None
+    # let the phone reconnect to them; its guard plays on as soon as they're
+    # there (or, if they never show up, allows the speaker -- on your press)
+    give_headphones_back_to_phone()
+    _audio_status.update(route=None, error=None,
+                         waiting=f"{_lock.get('device')} isn't connected to the Mac"
+                         + ("" if phone_has_headphones else " (music paused)"))
+
+
+def wait_for_locked_headphones():
+    """With the lock on, only play once the Mac's output is those headphones.
+    If the phone has them instead, pull them over to the Mac (the Mac comes
+    first); if neither has them, keep trying to connect them to the Mac."""
+    global _paused_for_lock
+    device = _lock.get("device")
+    next_try = 0
+    while _audio_on and _lock.get("on"):
+        if mac_output_name() == device:
+            if _audio_status.get("waiting"):
+                print(f"[audio] {device} is back on the Mac", file=sys.stderr)
+            _audio_status["waiting"] = None
+            return True
+        if time.time() >= next_try:
+            if phone_has_locked():
+                print(f"[audio] {device} is on the phone; pulling it over to the Mac", file=sys.stderr)
+                _audio_status.update(route=None, waiting=f"moving {device} from the phone to the Mac…")
+                _, err = phone_request("POST", "/api/media/pause", timeout=2)
+                _paused_for_lock = _paused_for_lock or err is None
+                phone_bt(False)
+                time.sleep(2)  # let the headphones notice the phone is gone
+                mac_connect_locked()
+                for _ in range(10):
+                    if mac_output_name() == device:
+                        break
+                    time.sleep(1)
+                if mac_output_name() != device:
+                    print(f"[audio] couldn't move {device} to the Mac; giving it back to the phone", file=sys.stderr)
+                    give_headphones_back_to_phone()
+                    if _paused_for_lock:
+                        time.sleep(4)
+                        phone_request("POST", "/api/media/resume_paused", timeout=3)
+                        _paused_for_lock = False
+                    next_try = time.time() + 60
+                continue
+            # on neither: maybe they just switched on or came back in range
+            mac_connect_locked()
+            next_try = time.time() + 15
+        _audio_status.update(route=None, waiting=f"{device} isn't connected to the Mac"
+                             + (" (music paused)" if _paused_for_lock else ""))
+        time.sleep(1)
+    return _audio_on
+
+
+def _resume_if_we_paused():
+    global _paused_for_lock
+    if _paused_for_lock:
+        time.sleep(1.5)  # let the capture take hold first, so play starts on the Mac
+        # plays exactly what was paused (play/pause would hit whichever app is first)
+        phone_request("POST", "/api/media/resume_paused", timeout=3)
+        _paused_for_lock = False
+
+
+def audio_loop():
+    scrcpy = find_scrcpy()
+    if not scrcpy:
+        _audio_status.update(error="phone audio needs scrcpy (brew install scrcpy)")
+        return
+    while _audio_on:
+        if _lock.get("on") and not wait_for_locked_headphones():
+            break
+        if _paused_for_lock:
+            threading.Thread(target=_resume_if_we_paused, daemon=True).start()
+        serial = usb_serial()
+        if serial:
+            drop_wifi_adb()
+            enable_adb_over_wifi(serial)
+            serial = usb_serial()  # it re-appears once adb has restarted
+            if serial:
+                _play(scrcpy, serial, "usb")
+                continue
+        serial = wifi_serial()
+        if serial:
+            _play(scrcpy, serial, "wi-fi")
+            continue
+        _audio_status.update(route=None, error="waiting for the phone over USB or Wi-Fi (audio can't go over Bluetooth)")
+        time.sleep(3)
+    _audio_status.update(route=None)
+
+
+def stop_leftover_audio():
+    """A previous server that crashed or was killed leaves its scrcpy capture
+    running; a second capture next to it splits the phone's audio between the
+    two and both sound broken. Matches only Dromac's own audio command line."""
+    for pattern in (str(ROOT / "dromac_fx.py"), str(ROOT / "dromac-audio"),
+                    "^[^ ]*/scrcpy -s [^ ]+ --no-video --no-control --no-window --audio-source=output"):
+        subprocess.run(["pkill", "-f", pattern], capture_output=True)
+
+
+_hold_set_at = 0
+_phone_playing = None
+
+
+def set_hold(hold):
+    """ai split plays ~9.5 s behind; pausing must still be instant (see dromac_fx)."""
+    global _hold_set_at
+    if bool(_fx.get("hold")) != bool(hold):
+        _fx["hold"] = bool(hold)
+        _hold_set_at = time.time()
+        write_fx()
+
+
+def note_phone_playing(playing):
+    """Follow pauses/plays made on the phone itself (seen in the state poll)."""
+    global _phone_playing
+    _phone_playing = playing
+    if time.time() - _hold_set_at > 3:   # a press here wins over a not-yet-updated poll
+        set_hold(not playing)
+
+
+def signal_skip(offset_ms):
+    """ai split plays a few seconds behind: on a skip, stop the old song now and
+    separate the new one from its start (see AISplit.skip_to)."""
+    if not (_audio_on and _fx.get("8d_on") and _fx.get("mode") == "ai"):
+        return
+    prev = _fx.get("skip") or {}
+    _fx["skip"] = {"n": prev.get("n", 0) + 1, "offset_ms": int(offset_ms)}
+    write_fx()
+
+
+_last_track = {"key": None, "pos": 0, "dur": 0}
+
+
+def note_track(np_):
+    """A song change that isn't the old one finishing is a skip made on the
+    phone: its new position says how long ago the new song began."""
+    key = f"{np_.get('title')}::{np_.get('artist')}"
+    last = dict(_last_track)
+    if key != _fx.get("song"):
+        _fx["song"] = key          # auto's learning starts over for each song
+        write_fx()
+    _last_track.update(key=key, pos=float(np_.get("position") or 0), dur=float(np_.get("duration") or 0))
+    if last["key"] and key != last["key"] and last["dur"] and last["pos"] < last["dur"] - 12000:
+        signal_skip(-min(4000, float(np_.get("position") or 0)))
+
+
+def set_fx(body):
+    """Live: within the effects path a preset change is just a file write."""
+    if body.get("8d") in FX_8D_PRESETS:
+        _fx["8d"] = body["8d"]
+        _fx["8d_on"] = True  # picking a path turns 8D on
+    if "8d_on" in body:
+        _fx["8d_on"] = bool(body["8d_on"])
+    if body.get("mode") in FX_MODES:
+        _fx["mode"] = body["mode"]   # the split: independent of 8D now
+    if "speed" in body:
+        try:
+            _fx["speed"] = round(min(4.0, max(0.25, float(body["speed"]))), 2)
+        except (TypeError, ValueError):
+            pass
+    if "accel" in body:
+        try:
+            _fx["accel"] = int(min(80, max(15, float(body["accel"]))))
+        except (TypeError, ValueError):
+            pass
+    if "room" in body:
+        _fx["room"] = bool(body["room"])
+    if "head" in body:
+        _fx["head"] = bool(body["head"])      # head tracking: the camera is on only while this is
+    if body.get("recenter"):
+        _fx["head_center"] = int(_fx.get("head_center", 0)) + 1
+    for key in ("kit_tight", "kit_boost", "self_mix"):
+        if key in body:
+            _fx[key] = bool(body[key])
+    # ambience: rain and thunder, made live by dromac_fx.py (Weather)
+    if isinstance(body.get("rain"), dict):
+        rain = dict(_fx.get("rain") or {"on": False, "preset": "storm cycle", "volume": 35})
+        r = body["rain"]
+        if "on" in r:
+            rain["on"] = bool(r["on"])
+            rain["paused"] = False
+        if r.get("preset") in RAIN_PRESETS:
+            rain["preset"] = r["preset"]
+        if "volume" in r:
+            try:
+                rain["volume"] = int(min(100, max(0, float(r["volume"]))))
+            except (TypeError, ValueError):
+                pass
+        if "thunder" in r:
+            try:
+                rain["thunder"] = int(min(12, max(-12, float(r["thunder"]))))   # dB, against the rain
+            except (TypeError, ValueError):
+                pass
+        _fx["rain"] = rain
+    if "kit" in body:
+        _fx["kit"] = bool(body["kit"])
+        if _fx["kit"]:
+            _fx["mode"] = "ai"       # the drum kit split is AI only
+    if "bass" in body:
+        try:
+            _fx["bass"] = int(min(12, max(0, float(body["bass"]))))
+        except (TypeError, ValueError):
+            pass
+    # which instruments you hear (split modes): vocals, drums, bass, other --
+    # any mix, e.g. just the bass. "vocals" alone is the older switch.
+    hear = dict(_fx.get("hear") or {})
+    if "vocals" in body:
+        hear["vocals"] = bool(body["vocals"])
+    if isinstance(body.get("hear"), dict):
+        for part in HEAR_PARTS:
+            if part in body["hear"]:
+                hear[part] = bool(body["hear"][part])
+    if "vocals" in body or "hear" in body:
+        _fx["hear"] = {part: hear.get(part, True) for part in HEAR_PARTS}
+        _fx["vocals"] = _fx["hear"]["vocals"]
+        if not all(_fx["hear"].values()) and _fx.get("mode") not in ("dsp", "ai"):
+            _fx["mode"] = "ai"       # leaving anything out needs the song split: AI quality
+    if "slowed" in body:
+        _fx["slowed"] = bool(body["slowed"])
+    write_fx()
+    save_audio_prefs()
+    if fx_active() and not _audio_on:
+        set_link(True)  # picking an effect turns the audio link on
+
+
+# ---- the audio link: one switch, on the Mac and on the phone ----
+# Off = back to completely normal: no capture, no effects, nothing paused, the
+# phone's Bluetooth its own again. The phone keeps the setting (AudioLink.kt);
+# either side can flip it and the other follows.
+_link_seen = None
+
+
+def set_link(on, from_phone=False):
+    global _link_seen
+    _link_seen = on
+    if not from_phone:
+        phone_request("POST", "/api/audio/link", {"on": on}, timeout=3)
+    if on:
+        if _lock.get("on"):
+            phone_request("POST", "/api/audio/guard", {"on": True, "device": _lock.get("device") or ""}, timeout=3)
+        set_audio(True)
+    else:
+        set_audio(False)  # stops the capture and hands Bluetooth back (see set_audio)
+    print(f"[audio] audio link {'on' if on else 'off'}{' (from the phone)' if from_phone else ''}", file=sys.stderr)
+
+
+def follow_phone_link(data):
+    """The phone's audio link switch, seen in its state: follow changes to it."""
+    global _link_seen
+    v = (data or {}).get("audioLink")
+    if v is None:
+        return
+    if _link_seen is None:
+        _link_seen = v
+        if not v and _audio_on:
+            set_link(False, from_phone=True)
+    elif v != _link_seen:
+        set_link(v, from_phone=True)
+
+
+def set_audio(on):
+    global _audio_on, _audio_thread
+    _audio_on = on
+    _audio_status["on"] = on
+    save_audio_prefs()
+    if on:
+        _audio_status.update(error=None)
+        if not (_audio_thread and _audio_thread.is_alive()):
+            _audio_thread = threading.Thread(target=audio_loop, daemon=True)
+            _audio_thread.start()
+    else:
+        _audio_status.update(route=None)
+        give_headphones_back_to_phone()  # audio off: the phone may use them again
+        threading.Thread(target=lambda: (time.sleep(1.5), None if _audio_on else stop_pipeline()), daemon=True).start()
+
+
+# ---------- USB fallback ----------
+# When Wi-Fi can't reach the phone at all (campus networks that block devices
+# from talking to each other, a beacon address that isn't routable from here),
+# a USB cable still works: `adb forward` maps a Mac port onto the phone's
+# server, so it answers on 127.0.0.1. Needs USB debugging on the phone, which
+# BlazingNet uses too. Preferred over Wi-Fi whenever the cable is in.
+# Order: USB cable -> Wi-Fi at the beacon's addresses -> (gateway / mDNS)
+# -> Bluetooth data link -> ring scan of the Wi-Fi.
+USB_LOCAL_PORT = 18822
+ADB_CANDIDATES = (
+    "/opt/homebrew/share/android-commandlinetools/platform-tools/adb",
+    "/opt/homebrew/bin/adb",
+    "/usr/local/bin/adb",
+    str(Path.home() / "Library/Android/sdk/platform-tools/adb"),
+)
+
+
+def find_adb():
+    found = shutil.which("adb")
+    if found:
+        return found
+    for path in ADB_CANDIDATES:
+        if os.access(path, os.X_OK):
+            return path
+    return None
+
+
+_last_usb_try = 0
+USB_RETRY_INTERVAL = 5  # seconds; `adb devices` is cheap but not free
+
+
+def try_usb():
+    """connect_via_usb, at most every few seconds (called from several loops)."""
+    global _last_usb_try
+    now = time.time()
+    if now - _last_usb_try < USB_RETRY_INTERVAL:
+        return False
+    _last_usb_try = now
+    return connect_via_usb()
+
+
+def connect_via_usb():
+    if os.environ.get("DROMAC_NO_USB"):  # for testing the Wi-Fi / Bluetooth paths with the cable in
+        return False
+    adb = find_adb()
+    if not adb:
+        return False
+    # Named explicitly: with the phone also on network adb (audio over Wi-Fi)
+    # a bare `adb forward` fails, and only the cable counts as USB here.
+    serial = usb_serial()
+    if not serial:
+        return False
+    try:
+        subprocess.run(
+            [adb, "-s", serial, "forward", f"tcp:{USB_LOCAL_PORT}", f"tcp:{PHONE_PORT_DEFAULT}"],
+            capture_output=True, timeout=4, check=True,
+        )
+    except Exception:
+        return False
+    if not probe_dromac("127.0.0.1", USB_LOCAL_PORT, timeout=1.5):
+        return False
+    print(f"[usb] connected over the cable (adb forward {USB_LOCAL_PORT} -> {PHONE_PORT_DEFAULT})", file=sys.stderr)
+    fetch_ble_key()
+    link_found({"phone_host": "127.0.0.1", "phone_port": USB_LOCAL_PORT, "last_connected": time.time(), "method": "usb"})
+    if _lock.get("on"):
+        phone_request("POST", "/api/audio/guard", {"on": True, "device": _lock.get("device") or ""}, timeout=3)
+    return True
+
+
+_last_known_wifi_try = 0
+
+
+def connect_via_known_wifi():
+    """Cable gone: try the phone's remembered addresses straight away (every
+    few seconds) -- its Wi-Fi one, or its hotspot one when the Mac is on the
+    hotspot -- before the slower searches."""
+    global _last_known_wifi_try
+    if time.time() - _last_known_wifi_try < 3:
+        return False
+    _last_known_wifi_try = time.time()
+    gw = default_gateway()
+    ips = known_wifi_ips()
+    for ip in ([gw] if gw in ips else []) + [i for i in ips if i != gw]:
+        if probe_dromac(ip, timeout=1.0):
+            print(f"[wifi] reconnected at the phone's remembered address {ip}", file=sys.stderr)
+            link_found({"phone_host": ip, "phone_port": PHONE_PORT_DEFAULT, "last_connected": time.time(), "method": "wifi"})
+            return True
+    return False
+
+
 def watchdog():
     """Automatic background reconnection using only the CHEAP methods: the
     gateway fast-path and a quick mDNS browse (a few seconds, event-driven —
     no network flooding). BLE discovery runs independently and usually wins
     the race (see handle_ble_hit).
 
-    Deliberately does NOT auto-trigger the expanding-ring IP scan: that walks
-    up to a /12 (~786k addresses) and can take up to ~30 minutes, so it should
-    only ever run when a person explicitly asks for it, never as a silent
-    background fallback that keeps grinding after the phone's already found."""
-    global _last_scan_attempt
+    The ring scan is the last resort: started only after everything else has
+    failed for SCAN_AFTER_DISCONNECTED seconds, capped at a /16, and abandoned
+    as soon as any other method reconnects (see maybe_ring_scan)."""
+    global _last_scan_attempt, _disconnected_since
     while True:
         try:
             state = load_state()
             host = state.get("phone_host")
             if host and is_phone_connected():
-                pass  # still reachable at the known address, nothing to do
+                if _disconnected_since is not None:
+                    _set_bt_failed(False)  # next outage: try Bluetooth again before scanning
+                _disconnected_since = None
+                if state.get("method") != "usb":
+                    try_usb()  # cable plugged in since: move onto it
+                elif not BLE_KEY_FILE.exists():
+                    fetch_ble_key()  # already on the cable from before the key existed
             else:
                 now = time.time()
-                if now - _last_scan_attempt >= RESCAN_INTERVAL:
+                if _disconnected_since is None:
+                    _disconnected_since = now
+                if try_usb():
+                    pass
+                elif connect_via_known_wifi():
+                    pass
+                elif now - _last_scan_attempt >= RESCAN_INTERVAL:
                     _last_scan_attempt = now
                     gw = default_gateway()
                     if gw and probe_dromac(gw):
-                        save_state({"phone_host": gw, "phone_port": PHONE_PORT_DEFAULT, "last_connected": time.time(), "method": "gateway"})
+                        link_found({"phone_host": gw, "phone_port": PHONE_PORT_DEFAULT, "last_connected": time.time(), "method": "gateway"})
                     else:
                         result = discover_via_mdns(timeout=3)
                         if result and probe_dromac(result["ip"], result.get("port") or PHONE_PORT_DEFAULT):
-                            save_state({
+                            link_found({
                                 "phone_host": result["ip"],
                                 "phone_port": result.get("port") or PHONE_PORT_DEFAULT,
                                 "last_connected": time.time(), "method": "mdns",
                             })
+                        else:
+                            maybe_bluetooth()
+                            if not bluetooth_link_pending():
+                                maybe_ring_scan()
         except Exception:
             pass
         time.sleep(6)
@@ -678,6 +1950,7 @@ BLE_PROBE_COOLDOWN = 3  # seconds; the phone re-advertises many times per second
 _ble_lock = threading.Lock()
 _ble_last_seen_at = 0.0
 _ble_last_seen_addr = None
+_ble_last_ips = []
 _ble_hit_count = 0
 _ble_last_logged_at = 0.0
 BLE_LOG_INTERVAL = 15  # seconds; the phone re-advertises constantly, don't flood server.log
@@ -699,32 +1972,50 @@ def ble_signal_status():
     }
 
 
-def handle_ble_hit(ip, port):
+def handle_ble_hit(ips, port):
     global _last_ble_hit, _ble_last_seen_at, _ble_last_seen_addr, _ble_hit_count, _ble_last_logged_at
     now = time.time()
+    shown = ", ".join(f"{ip}:{port}" for ip in ips)
     # Record the raw sighting unconditionally, before any of the "should we
     # act on this" logic below -- this is the part that must keep updating
     # even when we're already connected or on cooldown, so it truly reflects
     # radio reception rather than reconnect activity.
     with _ble_lock:
         _ble_last_seen_at = now
-        _ble_last_seen_addr = f"{ip}:{port}"
+        _ble_last_seen_addr = shown
+        _ble_last_ips[:] = ips
         _ble_hit_count += 1
         if now - _ble_last_logged_at >= BLE_LOG_INTERVAL:
             _ble_last_logged_at = now
-            print(f"[ble] packet received from {ip}:{port} (total seen: {_ble_hit_count})", file=sys.stderr)
+            print(f"[ble] packet received from {shown} (total seen: {_ble_hit_count})", file=sys.stderr)
     try:
         state = load_state()
-        if state.get("phone_host") == ip and state.get("phone_port") == port:
-            return  # already pointed at this exact address, nothing to do
+        # Only stand down while the current address is actually answering.
+        # Skipping whenever the stored address matched the beacon used to leave
+        # us pinned to an unreachable one (the phone's hotspot address, seen
+        # from campus Wi-Fi) forever, with the beacon unable to fix it. A
+        # working USB link is kept: the beacon doesn't list it, and it's the
+        # more reliable path anyway.
+        connected = _last_status["connected"] and now - _last_status["checked_at"] < 10
+        if connected and (state.get("phone_host") in ips or state.get("method") == "usb"):
+            return
         if now - _last_ble_hit < BLE_PROBE_COOLDOWN:
             return
         _last_ble_hit = now
-        if probe_dromac(ip, port):
-            print(f"[ble] reconnected via {ip}:{port}", file=sys.stderr)
-            save_state({"phone_host": ip, "phone_port": port, "last_connected": time.time(), "method": "ble"})
-        else:
-            print(f"[ble] packet from {ip}:{port} but probe_dromac failed (not reachable / wrong port?)", file=sys.stderr)
+        if try_usb():
+            return
+        if not ips:
+            # the phone's here but has no address (mobile data only): the
+            # Bluetooth data link is the way in -- go straight to it
+            if not (connected and state.get("method") == "bluetooth"):
+                maybe_bluetooth()
+            return
+        for ip in ips:
+            if probe_dromac(ip, port):
+                print(f"[ble] reconnected via {ip}:{port}", file=sys.stderr)
+                link_found({"phone_host": ip, "phone_port": port, "last_connected": time.time(), "method": "ble"})
+                return
+        print(f"[ble] packet from {shown} but probe_dromac failed on every address (not reachable / wrong port?)", file=sys.stderr)
     except Exception:
         pass
 
@@ -734,6 +2025,8 @@ def ble_supervisor():
     it (with a short backoff) whenever it exits -- crash, Bluetooth adapter
     reset, permission prompt, anything. Runs until the app itself is quit."""
     global _ble_helper_alive, _ble_helper_last_exit_at
+    if os.environ.get("DROMAC_NO_BLE"):  # for testing the other paths
+        return
     if not BLE_HELPER_PATH.exists():
         print("[ble] ble_helper.py not found, BLE discovery disabled", file=sys.stderr)
         return
@@ -1181,10 +2474,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self._request_allowed(p):
             return self._json({"error": "forbidden"}, 403)
 
+        if p == "/api/audio/pos":
+            # where the sound is right now (fast-polled by the 8D view in "auto",
+            # where the positions come from the conductor, not a formula)
+            return self._json(fx_position_any() or {})
+
         if p == "/api/state":
             state = load_state()
             phone_data, err = phone_request("GET", "/api/state")
             connected = phone_data is not None
+            remember_wifi_ip(phone_data)
+            follow_phone_link(phone_data)
             payload = {
                 "connected": connected,
                 "host": state.get("phone_host"),
@@ -1196,6 +2496,7 @@ class Handler(BaseHTTPRequestHandler):
                 "volume": None,
                 "error": None if connected else err,
                 "ble": ble_signal_status(),
+                "audio": dict(_audio_status, fx=dict(_fx), lock=dict(_lock), pos=fx_position() if fx_active() else None),
             }
             with _pending_photo_lock:
                 payload["cameraPendingAt"] = _pending_photo_at or None
@@ -1208,6 +2509,8 @@ class Handler(BaseHTTPRequestHandler):
                 if vol:
                     payload["volume"] = {"level": vol.get("level", 0), "min": 0, "max": vol.get("max", 15)}
                 np = phone_data.get("now_playing")
+                if np and "playing" in np:
+                    note_phone_playing(bool(np.get("playing")))
                 if np:
                     log_recent_track(np.get("title"), np.get("artist"))
                     artwork = None
@@ -1457,11 +2760,43 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json()
 
         if p == "/internal/ble_hit":
-            ip = body.get("ip", "")
+            ips = [ip for ip in (body.get("ips") or [body.get("ip", "")]) if ip]
             port = body.get("port")
-            if ip and port:
-                handle_ble_hit(ip, int(port))
+            if port:
+                handle_ble_hit(ips, int(port))
             return self._json({"ok": True})
+
+        # With rain on, play/pause (the headphones' button, the media keys) steps
+        # through: music paused (the rain plays on) -> rain paused too -> rain
+        # back -> music back. Rain off: the usual play/pause.
+        rain = _fx.get("rain") or {}
+        if p == "/api/media/play_pause" and rain.get("on") and _audio_on:
+            music_on = _phone_playing is not False
+            if not music_on:
+                if rain.get("paused"):
+                    rain["paused"] = False                  # rain back first...
+                    globals()["_rain_back"] = True
+                    _fx["rain"] = rain; write_fx(); save_audio_prefs()
+                    return self._json({"ok": True, "rain": "playing"})
+                if not globals().get("_rain_back"):
+                    rain["paused"] = True                   # ...after the music, the rain pauses
+                    _fx["rain"] = rain; write_fx(); save_audio_prefs()
+                    return self._json({"ok": True, "rain": "paused"})
+            globals()["_rain_back"] = False                 # (then the music, as usual)
+            if rain.get("paused"):
+                rain["paused"] = False
+                _fx["rain"] = rain; write_fx(); save_audio_prefs()
+
+        if p == "/api/media/play_pause" and _phone_playing is not None:
+            set_hold(_phone_playing)  # silence (or sound) right now; the phone follows
+            if not _phone_playing:
+                globals()["_phone_playing"] = True
+            else:
+                globals()["_phone_playing"] = False
+
+        if p in ("/api/media/next", "/api/media/prev"):
+            signal_skip(400)  # the phone switches ~0.4 s after the press
+            _last_track["key"] = None  # this change is known; don't count it twice
 
         if p in (
             "/api/media/play_pause", "/api/media/next", "/api/media/prev",
@@ -1640,6 +2975,34 @@ class Handler(BaseHTTPRequestHandler):
             })
             return self._json({"ok": err is None, "error": err})
 
+        if p in ("/api/audio/start", "/api/audio/stop"):
+            set_audio(p.endswith("start"))
+            return self._json({"ok": True, "audio": dict(_audio_status, fx=dict(_fx))})
+
+        if p == "/api/audio/catchup":
+            # leaving ai split seamlessly (see dromac_fx.py): pause the phone while
+            # the Mac plays out what it had buffered, then resume it in step
+            phase = urllib.parse.parse_qs(parsed.query).get("phase", [""])[0]
+            global _hold_set_at
+            _hold_set_at = time.time() + 15  # this pause isn't yours: don't hold the audio for it
+            if phase == "pause":
+                phone_request("POST", "/api/media/pause", timeout=3)
+            elif phase == "resume":
+                phone_request("POST", "/api/media/resume_paused", timeout=3)
+            return self._json({"ok": True})
+
+        if p == "/api/audio/link":
+            set_link(bool(body.get("on")))
+            return self._json({"ok": True, "audio": dict(_audio_status, fx=dict(_fx), lock=dict(_lock))})
+
+        if p == "/api/audio/lock":
+            err = set_lock(bool(body.get("on")))
+            return self._json({"ok": err is None, "error": err, "audio": dict(_audio_status, fx=dict(_fx), lock=dict(_lock))})
+
+        if p == "/api/audio/fx":
+            set_fx(body)
+            return self._json({"ok": True, "audio": dict(_audio_status, fx=dict(_fx))})
+
         if p == "/api/ring":
             _, err = phone_request("POST", "/api/ring")
             return self._json({"ok": err is None, "error": err})
@@ -1714,7 +3077,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    stop_leftover_audio()
     threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=lambda: (time.sleep(4), restore_audio()), daemon=True).start()
+    threading.Thread(target=bt_link_supervisor, daemon=True).start()
     threading.Thread(target=ble_supervisor, daemon=True).start()
     threading.Thread(target=camera_poll_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)

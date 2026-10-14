@@ -12,7 +12,7 @@ support="$HOME/Library/Application Support/Dromac"
 app="$HOME/Applications/Dromac.app"
 
 mkdir -p "$support"
-cp "$here/server.py" "$here/ble_helper.py" "$support/"
+cp "$here/server.py" "$here/ble_helper.py" "$here/ble_link.py" "$here/dromac_fx.py" "$here/dromac_sep.py" "$here/dromac_mood.py" "$here/dromac_drums.py" "$here/dromac_head.swift" "$here/dromac_head.plist" "$here/dromac_audio.swift" "$here/dromac_audio.plist" "$support/"
 rsync -a --delete "$here/static/" "$support/static/"
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -23,6 +23,15 @@ cp "$here/app/icon.icns" "$app/Contents/Resources/icon.icns"
 # Ad-hoc signature, so macOS keeps a stable identity for the Bluetooth
 # permission prompt across updates.
 codesign --force --sign - "$app" >/dev/null 2>&1 || true
+
+# The Bluetooth helpers outlive the server; stop them so the new ones start.
+pkill -f "$support/ble_helper.py" 2>/dev/null || true
+pkill -f "$support/ble_link.py" 2>/dev/null || true
+# Same for phone audio: an old capture left running alongside a new one makes
+# both play broken (two readers splitting one stream: sped-up and clicking).
+pkill -f "$support/dromac_fx.py" 2>/dev/null || true
+pkill -f "$support/dromac-audio" 2>/dev/null || true
+pkill -f "^[^ ]*/scrcpy -s [^ ]+ --no-video --no-control --no-window --audio-source=output" 2>/dev/null || true
 
 # The launcher only starts the server if nothing is answering on its port,
 # so an already-running old server would otherwise keep serving old code.
