@@ -17,7 +17,8 @@ a car, rain alone...). Each kept event is then
 Run with the Python that runs Dromac (it has torch and transformers).
 
 The recordings (download each into models/thunder_src as t00, t01, ...;
-Commons serves an MP3 of each Ogg, which macOS can read):
+Commons serves an MP3 of each Ogg, which macOS can read; t10 is the 96 kHz
+storm the rain bank uses too):
   t00: "Booming Thunder 2023-10-09 2-07-34 am.ogg" by KTerPalmers (CC BY-SA 4.0)
         https://commons.wikimedia.org/wiki/File:Booming_Thunder_2023-10-09_2-07-34_am.ogg
   t01: "Lightning Recorded In Groningen 2018-05-13 01.wav" by A. Whyborn (CC BY-SA 4.0)
@@ -38,6 +39,8 @@ Commons serves an MP3 of each Ogg, which macOS can read):
         https://commons.wikimedia.org/wiki/File:Thunder_crack_2B.wav
   t09: "Very close thunder cracks.flac" by Delorean76 (CC BY-SA 3.0)
         https://commons.wikimedia.org/wiki/File:Very_close_thunder_cracks.flac
+  t10: "Rain on Concrete during storm with thunder.wav" by Dakendzor (CC BY-SA 4.0)
+        https://commons.wikimedia.org/wiki/File:Rain_on_Concrete_during_storm_with_thunder.wav
 """
 import json
 import sys
@@ -198,11 +201,26 @@ def main():
             clips.append(seg.astype(np.float32))
             meta.append({"src": p.name, "at_s": round(start / R, 1), "sure": round(sure, 2), "peak_db": round(peak, 1),
                          "sharp_hz": round(sharp), "rain_removed_db": round(float(removed), 1)})
-    order = sorted(range(len(clips)), key=lambda i: -(meta[i]["sure"] + meta[i]["peak_db"] / 50))[:40]
+    # the best first, but taking turns between recordings, so no one storm
+    # dominates the pool
+    by_src = {}
+    for i in sorted(range(len(clips)), key=lambda i: -(meta[i]["sure"] + meta[i]["peak_db"] / 50)):
+        by_src.setdefault(meta[i]["src"], []).append(i)
+    order = []
+    while len(order) < 48 and any(by_src.values()):
+        for f in list(by_src):
+            if by_src[f] and len(order) < 48:
+                order.append(by_src[f].pop(0))
     out = ROOT / "thunder"
     out.mkdir(exist_ok=True)
     np.savez(out / "pool.npz", **{f"c{k}": clips[i] for k, i in enumerate(order)})
     (out / "pool.json").write_text(json.dumps([meta[i] for i in order], indent=1))
+    sources = json.loads((ROOT / "thunder_src" / "sources.json").read_text())
+    lines = ["Thunder recordings used by Dromac, from Wikimedia Commons. Cut into clips, de-rained,",
+             "bass-boosted, varied in playback; used under the licences below.", ""]
+    lines += [f't{i:02d}: "{o["title"]}" by {o["artist"] or "unknown"} -- {o["license"]} -- {o["page"]}'
+              for i, o in enumerate(sources)]
+    (out / "CREDITS.txt").write_text("\n".join(lines) + "\n")
     print(f"{len(order)} thunder clips in the pool ({sum(c.shape[1] for c in clips) / R / 60:.0f} min considered); "
           f"rain removed: median {np.nanmedian([meta[i]['rain_removed_db'] for i in order]):.1f} dB")
 

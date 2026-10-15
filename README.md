@@ -132,12 +132,19 @@ sets the front.
 
 ### Rain and thunder
 
-An **ambience** layer under the music, made live so it never repeats:
-thousands of drops a second (real size distribution, near and far, puddles,
-leaves, drips from a gutter), swelling in waves with the wind. Thunder is
-real: 40 claps and rolls cut from field recordings, cleaned of their rain,
-bass-boosted, and never played the same way twice; the 3D view flashes with
-the lightning first and the thunder follows, ~3 s per kilometre. Presets:
+An **ambience** layer under the music that never loops. The rain is real:
+pieces of field recordings (light, heavy, on a window, in a forest), each
+blending into another every 20-60 s, with a second under it, mirrored, so it's
+fuller and wider than any one recording; on top, drops made live (near and far,
+puddles, leaves, drips from a gutter) give it close-up 3D detail that stays put
+as you turn your head. The thunder is real too: 48 claps and rolls from nine
+storms, cleaned of their rain, bass-boosted (with a sub-bass layer that follows
+each roll), and never played the same way twice -- its deep end in both ears,
+the roll sweeping across the sky. Storms keep a real rhythm: activity rises and
+falls over minutes, and every few minutes a cell passes overhead, strikes
+coming every few seconds, closer, rolls overlapping, before it eases off. The
+3D view flashes with the lightning first; the thunder follows, ~3 s per
+kilometre. Presets:
 drizzle, steady, downpour, thunderstorm, distant storm, tin roof, window,
 forest, and a half-hour **storm cycle** through all of them. Rain volume and
 a separate **thunder** level. With rain on, play/pause pauses the music, then
@@ -206,10 +213,11 @@ size); Dromac works without them, just without that feature:
   [LarsNet repository](https://github.com/polimi-ispl/larsnet), unzipped so
   that `~/Library/Application Support/Dromac/models/larsnet/kick/pretrained_kick_unet.pth`
   (and snare, toms, hihat, cymbals) exist.
-- **Thunder**: ten recordings from Wikimedia Commons (listed, with authors
-  and licences, in `mac/tools/make_thunder_pool.py`), built into a pool with
-  that script.
-  Without it, rain plays with no thunder.
+- **Rain and thunder**: field recordings from Wikimedia Commons, listed with
+  authors and licences in `mac/tools/make_rain_bank.py` and
+  `mac/tools/make_thunder_pool.py`, which build them into the rain bank and
+  the thunder pool. Without the bank, rain is made entirely live; without the
+  pool, there's no thunder.
 
 This installs the server into `~/Library/Application Support/Dromac` and
 the launcher at `~/Applications/Dromac.app`. Re-run it to update. Open
@@ -293,5 +301,6 @@ Steinrucken (BigWings) and is CC BY-NC-SA 3.0. See [LICENSE](LICENSE).
 
 Models and recordings Dromac can use are not part of this repository and keep
 their own licences: LarsNet's checkpoints (CC BY-NC 4.0), Demucs (MIT), CLAP
-(Apache 2.0), and the thunder recordings (CC BY / CC BY-SA, credited in the
+(Apache 2.0), and the rain and thunder recordings (CC0 / public domain /
+CC BY / CC BY-SA, credited in the bank's and the
 pool's `CREDITS.txt`).

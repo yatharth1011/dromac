@@ -1905,14 +1905,15 @@ class Weather:
         self.drops = np.zeros((2, BLOCK))       # drops still ringing past this block
         self.gust = 0.0
         self.gust_v = 0.0
-        self.thunder = None                     # the clap playing now: (clap, position)
+        self.claps = []                          # strikes on their way or sounding (up to two at once)
+        self.activity = 0.0                      # the storm's mood, drifting over minutes
+        self.burst_left = 0.0                    # seconds left of a cell passing overhead
         self.yaw = 0.0                          # where you're facing (head tracking), radians
         self.flash = 0.0                        # when lightning last struck (for the dashboard's flash)
         self.thunder_gain = 1.0                 # the "thunder" control, against the rain
-        self.thunder_ready = None               # the next one, made in the background
         self.next_thunder = None                # seconds of rain until it
-        self.making = False
         self.lock = threading.Lock()
+        self.real = RealRain()                  # real rain (when its bank is there)
         self.threading = threading
 
     # ---------- the hiss ----------
@@ -1953,6 +1954,11 @@ class Weather:
     # their own sound (a puddle, a leaf, a stone), and drips -- a gutter, a
     # branch -- fall in a loose rhythm of their own.
     MAX_DROPS = 90                       # per 20 ms block
+    # real rain's level by preset (its pieces are all levelled to -24 dBFS)
+    REAL_LEVEL = {"drizzle": 0.45, "steady": 0.8, "downpour": 1.4, "thunderstorm": 1.15, "distant storm": 0.75,
+                  "tin roof": 0.55, "window": 0.7, "forest": 0.95}
+    # how often (s, on average) a cell passes overhead: busy spells of thunder
+    BURST_EVERY = {"thunderstorm": 240, "window": 300, "downpour": 420, "tin roof": 480, "distant storm": 900}
     RAIN_MM_H = {"drizzle": 1.0, "steady": 6.0, "downpour": 35.0, "thunderstorm": 18.0,
                  "distant storm": 5.0, "tin roof": 8.0, "window": 6.0, "forest": 8.0}
     SPOTS = {"open": ("puddle", "stone", "puddle"), "forest": ("leaf", "leaf", "puddle"),
@@ -2133,14 +2139,15 @@ class Weather:
                 cls._pool_cache = []
         return cls._pool_cache
 
-    def _make_thunder(self, km_range):
-        """One strike, from the pool (in the background)."""
+    def _make_thunder(self, km, clap):
+        """One strike at `km`, from the pool, into `clap` (in the background)."""
         try:
             pool = self._pool()
             if not pool:
+                clap["high"] = np.zeros(1)                   # nothing to play
+                clap.update(low=np.zeros(1), echo=np.zeros((2, 1)), az=0.0, sweep=0.0)
                 return
             rng = np.random.default_rng()
-            km = float(np.exp(rng.uniform(np.log(km_range[0]), np.log(km_range[1]))))
             # a close strike wants a sharp clap, a far one a dull roll: rank the
             # pool by fit, pick among the better half, not one of the last few
             recent = getattr(self, "recent_claps", [])
@@ -2178,7 +2185,7 @@ class Weather:
             split = 1 / np.sqrt(1 + (f / 150) ** 4)
             low = np.fft.irfft(M * split, len(mid))
             high = mid - low
-            low *= 10 ** (3 / 20)                     # a little more of the deep end (+3 dB)
+            low *= 10 ** (7 / 20)                     # the deep end you feel: +7 dB
             # the sky's echo, from all round: two different (so it's wide),
             # darker tails
             m2 = 1 << int(np.ceil(np.log2(len(mid) + 3 * RATE)))
@@ -2193,19 +2200,41 @@ class Weather:
             # the roll travels across the sky as it goes
             az0 = rng.uniform(-np.pi, np.pi)
             sweep = rng.choice([-1, 1]) * rng.uniform(0.4, 1.3)
-            lead = min(12.0, km * 1000 / 343 * rng.uniform(0.9, 1.1))
-            with self.lock:
-                self.thunder_ready = {"high": high, "low": low, "echo": echo, "az": az0, "sweep": sweep, "lead": lead}
-        finally:
-            self.making = False
+            clap.update(low=low, echo=echo, az=az0, sweep=sweep)
+            clap["high"] = high                              # (last: it's what says "ready")
+        except Exception:
+            clap["high"] = np.zeros(1)
+            clap.update(low=np.zeros(1), echo=np.zeros((2, 1)), az=0.0, sweep=0.0)
+
+    # When it strikes. Real storms aren't a metronome: their activity drifts
+    # over minutes, and every few minutes a cell passes overhead -- a busy
+    # spell of a minute or two with strikes every few seconds, closer, rolls
+    # overlapping -- then it eases off again. Gaps are drawn from a gamma
+    # distribution (uneven, like real lightning, never closer than 2.5 s).
+    # Each strike is made the moment the lightning flashes, at its own
+    # distance; the sound's travel time hides the making.
+    def _strike_gap(self, every):
+        mean = float(np.sqrt(every[0] * every[1]))
+        if self.burst_left > 0:
+            mean = self.rng.uniform(5, 9)                      # a cell overhead
+        else:
+            mean /= float(np.exp(0.5 * self.activity))
+        return max(2.5, float(self.rng.gamma(2.2, mean / 2.2)))
 
     def _thunder_block(self, every, km_range):
         out = np.zeros((2, BLOCK))
-        if self.thunder is not None:
-            clap, at = self.thunder
-            if at < 0:                                   # the flash has been; the sound's on its way
-                self.thunder = (clap, at + BLOCK)
-                return out
+        dt = BLOCK / RATE
+        # play what's sounding (up to two rolls at once)
+        still = []
+        for clap in self.claps:
+            if clap.get("high") is None:                    # still being made: wait
+                still.append(clap)
+                continue
+            at = clap["at"]
+            if at < 0:                                       # the flash has been; the sound's on its way
+                clap["at"] = at + BLOCK
+                still.append(clap)
+                continue
             n = len(clap["high"])
             high = clap["high"][at:at + BLOCK]
             k = len(high)
@@ -2214,25 +2243,35 @@ class Weather:
             side = np.sin(az)
             gl, gr = np.sqrt(0.5 * (1 - 0.8 * side)), np.sqrt(0.5 * (1 + 0.8 * side))
             low = clap["low"][at:at + BLOCK] * np.sqrt(0.5)
-            out[:, :k] = clap["echo"][:, at:at + BLOCK] + np.stack([high * gl + low, high * gr + low])
-            self.thunder = (clap, at + BLOCK) if at + BLOCK < n else None
+            out[:, :k] += clap["echo"][:, at:at + BLOCK] + np.stack([high * gl + low, high * gr + low])
+            clap["at"] = at + BLOCK
+            if at + BLOCK < n:
+                still.append(clap)
+        self.claps = still
         if every is None:
             self.next_thunder = None
+            self.burst_left = 0.0
             return out
-        if self.thunder_ready is None and not self.making:
-            self.making = True
-            self.threading.Thread(target=self._make_thunder, args=(km_range,), daemon=True).start()
+        # the storm's mood: activity drifting over minutes, and the busy spells
+        self.activity += -self.activity * dt / 120 + self.rng.standard_normal() * np.sqrt(2 * dt / 120)
+        if self.burst_left > 0:
+            self.burst_left -= dt
+        elif self.rng.random() < dt / self.BURST_EVERY.get(self.preset, 300):
+            self.burst_left = self.rng.uniform(60, 150)
         if self.next_thunder is None:
             self.next_thunder = self.rng.uniform(4, every[0] * 0.5)          # the first one soon
-        self.next_thunder -= BLOCK / RATE
-        if self.next_thunder <= 0 and self.thunder is None:
-            with self.lock:
-                ready, self.thunder_ready = self.thunder_ready, None
-            if ready is not None:
-                # lightning: now. Its thunder: after the sound's travel time
-                self.flash = __import__("time").time()
-                self.thunder = (ready, -int(ready["lead"] * RATE))
-                self.next_thunder = self.rng.uniform(*every)
+        self.next_thunder -= dt
+        if self.next_thunder <= 0 and len(self.claps) < 2:
+            # closer while a cell is overhead
+            lo, hi = km_range
+            if self.burst_left > 0:
+                hi = float(np.sqrt(lo * hi))
+            km = float(np.exp(self.rng.uniform(np.log(lo), np.log(hi))))
+            clap = {"at": -int(min(12.0, km * 1000 / 343 * self.rng.uniform(0.9, 1.1)) * RATE), "high": None}
+            self.claps.append(clap)
+            self.flash = __import__("time").time()               # lightning: now
+            self.threading.Thread(target=self._make_thunder, args=(km, clap), daemon=True).start()
+            self.next_thunder = self._strike_gap(every)
         return out
 
     def render(self, preset, volume, yaw=0.0, thunder_db=0.0):
@@ -2275,16 +2314,103 @@ class Weather:
         # how hard it's raining just now, and the wind
         swell, wind = self._weather_moods()
         swell = 1 + (swell - 1) * (0.5 + gusts)
-        bed = self._bed_block(bright) * bed_level * swell
+        real = self.real.render(self.preset)
+        if real is not None:
+            # real rain carries the sound (its own swells, gently followed);
+            # the made drops stay on top, quieter, for the close-up 3D detail
+            bed = real * self.REAL_LEVEL.get(self.preset, 1.0) * swell ** 0.5
+        else:
+            bed = self._bed_block(bright) * bed_level * swell
         # the wind leans the wash to one side (as heard from where you face)
         lean = 0.18 * np.tanh(wind - self.yaw)
         bed = bed * np.array([[1 - lean], [1 + lean]])
         if surface == "glass":
             bed *= 0.6
-        drops = self._drops_block(rate * swell, bubbles, surface, bright, wind) * 0.35
+        drops = self._drops_block(rate * swell, bubbles, surface, bright, wind) * (0.18 if real is not None else 0.35)
         if getattr(self, "overflow", 0) > 0:
             bed = bed * (1 + 0.5 * self.overflow)        # the drops past the cap, as wash
         return bed + drops, self._thunder_block(every, km)
+
+
+class RealRain:
+    """Real rain, from field recordings (models/rain, built by
+    tools/make_rain_bank.py; credits there), that never loops: pieces of the
+    right kind for the preset (light, heavy, on a window, in a forest), each
+    blending into another every 20-60 s over 4 s -- and a second one under it,
+    mirrored left for right, so it's denser and wider than any one recording."""
+
+    KINDS = {"drizzle": ("light",), "steady": ("light", "heavy"), "downpour": ("heavy",),
+             "thunderstorm": ("heavy",), "distant storm": ("light", "heavy"), "tin roof": ("light",),
+             "window": ("window",), "forest": ("forest",)}
+    BLEND = 4.0
+    _bank = None
+
+    @classmethod
+    def bank(cls):
+        if cls._bank is None:
+            folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "rain")
+            try:
+                z = np.load(os.path.join(folder, "bank.npz"))
+                meta = json.load(open(os.path.join(folder, "bank.json")))
+                cls._bank = [(z[f"p{k}"], m["kind"]) for k, m in enumerate(meta)]
+            except Exception:
+                cls._bank = []
+        return cls._bank
+
+    def __init__(self):
+        self.rng = np.random.default_rng()
+        self.streams = [{"now": None, "old": None}, {"now": None, "old": None}]
+
+    def _pick(self, kinds, avoid):
+        bank = self.bank()
+        fits = [k for k, (_, kind) in enumerate(bank) if kind in kinds and k not in avoid]
+        if not fits:
+            fits = [k for k in range(len(bank)) if k not in avoid] or list(range(len(bank)))
+        return int(self.rng.choice(fits))
+
+    def _start(self, stream, kinds, avoid):
+        k = self._pick(kinds, avoid)
+        piece = self.bank()[k][0]
+        span = piece.shape[1]
+        at = int(self.rng.integers(0, max(1, span - 20 * RATE)))       # somewhere into it
+        stream["old"] = stream["now"]
+        stream["now"] = {"k": k, "at": at, "left": self.rng.uniform(20, 60) * RATE}
+        stream["blend"] = 0 if stream["old"] is not None else int(self.BLEND * RATE)
+
+    def _read(self, s):
+        piece = self.bank()[s["k"]][0]
+        a = s["at"] % piece.shape[1]
+        out = piece[:, a:a + BLOCK].astype(np.float64)
+        if out.shape[1] < BLOCK:                                       # off the end: round to the start
+            out = np.concatenate([out, piece[:, : BLOCK - out.shape[1]].astype(np.float64)], axis=1)
+        s["at"] += BLOCK
+        s["left"] -= BLOCK
+        return out
+
+    def render(self, preset):
+        if not self.bank():
+            return None
+        kinds = self.KINDS.get(preset, ("light", "heavy"))
+        out = np.zeros((2, BLOCK))
+        for i, st in enumerate(self.streams):
+            other = self.streams[1 - i]["now"]
+            avoid = {st["now"]["k"]} if st["now"] else set()
+            if other:
+                avoid.add(other["k"])
+            if st["now"] is None or st["now"]["left"] <= 0 or self.bank()[st["now"]["k"]][1] not in kinds:
+                self._start(st, kinds, avoid)
+            x = self._read(st["now"])
+            blend = int(self.BLEND * RATE)
+            if st["old"] is not None and st.get("blend", blend) < blend:
+                a = np.clip((st["blend"] + np.arange(1, BLOCK + 1)) / blend, 0, 1)
+                x = x * np.sin(a * np.pi / 2) + self._read(st["old"]) * np.cos(a * np.pi / 2)
+                st["blend"] += BLOCK
+                if st["blend"] >= blend:
+                    st["old"] = None
+            if i == 1:
+                x = x[::-1] * 0.55                       # the second, under it: mirrored, quieter
+            out += x
+        return out
 
 
 class StormCycle:
