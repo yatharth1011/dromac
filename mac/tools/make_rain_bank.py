@@ -67,6 +67,31 @@ MINUTES_PER_KIND = 6.0
 PIECE = 45                                   # seconds, at most
 
 
+def loudness(seg):
+    """Loudness as ears hear it (ITU-R BS.1770 K-weighting: no deep rumble,
+    the presence range lifted), in dB -- plain energy is fooled by wind and
+    low rumble, which carry a lot of it but sound quiet."""
+    n = seg.shape[1]
+    f = np.fft.rfftfreq(n, 1 / R)
+    k = (f / np.sqrt(f ** 2 + 38.0 ** 2)) ** 2 * np.sqrt(1 + (10 ** (4 / 10) - 1) / (1 + (1500 / np.maximum(f, 1)) ** 2))
+    w = np.array([np.fft.irfft(np.fft.rfft(ch) * k, n) for ch in seg])
+    return 10 * np.log10((w ** 2).mean() + 1e-12)
+
+
+TARGET = -27.0                               # K-weighted dB for every piece
+
+
+def flatten(seg, amount=0.6):
+    """Evens out slow swells: the 2 s loudness pulled most of the way to its mean."""
+    n = seg.shape[1]
+    f = np.fft.rfftfreq(n, 1 / R)
+    k = (f / np.sqrt(f ** 2 + 38.0 ** 2)) ** 2 * np.sqrt(1 + (10 ** 0.4 - 1) / (1 + (1500 / np.maximum(f, 1)) ** 2))
+    w = np.array([np.fft.irfft(np.fft.rfft(ch) * k, n) for ch in seg])
+    e = np.sqrt(np.convolve((w ** 2).mean(0), np.ones(2 * R) / (2 * R), "same")) + 1e-9
+    g = np.convolve((e.mean() / e) ** amount, np.ones(R) / R, "same")
+    return seg * g
+
+
 def load(path):
     """Any format macOS reads -> 48 kHz stereo float (via afconvert)."""
     tmp = Path("/tmp") / (path.stem + "_48k.wav")
@@ -155,10 +180,17 @@ def main():
                     order.append(by_src[f].pop(0))
         total = 0
         for score, f, a, b, seg, _ in order:
+            # even: no sudden jump inside (a gust, a slam, rain starting from
+            # silence) -- 1 s loudness never moving > 6 dB at once or 9 dB overall
+            secs = [loudness(seg[:, i:i + R]) for i in range(0, seg.shape[1] - R + 1, R)]
+            if len(secs) > 1 and (np.abs(np.diff(secs)).max() > 6 or np.percentile(secs, 95) - np.percentile(secs, 5) > 9):
+                if kind != "window":
+                    continue
+                seg = flatten(seg)                   # (window rain gusts on the glass: evened out, kept)
             if total > MINUTES_PER_KIND * 60 * R:
                 break
             seg = seg - seg.mean(1, keepdims=True)
-            seg *= 10 ** (-24 / 20) / (np.sqrt((seg ** 2).mean()) + 1e-12)       # all at -24 dBFS
+            seg *= 10 ** ((TARGET - loudness(seg)) / 20)                          # all equally loud, to the ear
             fade = int(0.05 * R)
             seg[:, :fade] *= np.linspace(0, 1, fade)
             seg[:, -fade:] *= np.linspace(1, 0, fade)

@@ -2336,13 +2336,16 @@ class RealRain:
     """Real rain, from field recordings (models/rain, built by
     tools/make_rain_bank.py; credits there), that never loops: pieces of the
     right kind for the preset (light, heavy, on a window, in a forest), each
-    blending into another every 20-60 s over 4 s -- and a second one under it,
-    mirrored left for right, so it's denser and wider than any one recording."""
+    blending into another every 20-60 s over 10 s -- and a second one under
+    it, mirrored left for right, so it's denser and wider than any one
+    recording. The pieces are levelled by how loud they sound (K-weighted),
+    and a slow leveller (+-4 dB, over seconds) smooths what's left between
+    them, leaving the rain's own swells."""
 
     KINDS = {"drizzle": ("light",), "steady": ("light", "heavy"), "downpour": ("heavy",),
              "thunderstorm": ("heavy",), "distant storm": ("light", "heavy"), "tin roof": ("light",),
              "window": ("window",), "forest": ("forest",)}
-    BLEND = 4.0
+    BLEND = 10.0
     _bank = None
 
     @classmethod
@@ -2372,9 +2375,13 @@ class RealRain:
         k = self._pick(kinds, avoid)
         piece = self.bank()[k][0]
         span = piece.shape[1]
-        at = int(self.rng.integers(0, max(1, span - 20 * RATE)))       # somewhere into it
+        blend = int(self.BLEND * RATE)
+        # somewhere into it, and its turn over well before its end: it always
+        # leaves with a blend, never a cut back to its own start
+        at = int(self.rng.integers(0, max(1, span - 2 * blend - 15 * RATE)))
+        left = min(self.rng.uniform(20, 60) * RATE, span - at - 2 * blend)
         stream["old"] = stream["now"]
-        stream["now"] = {"k": k, "at": at, "left": self.rng.uniform(20, 60) * RATE}
+        stream["now"] = {"k": k, "at": at, "left": max(left, blend)}
         stream["blend"] = 0 if stream["old"] is not None else int(self.BLEND * RATE)
 
     def _read(self, s):
@@ -2410,7 +2417,18 @@ class RealRain:
             if i == 1:
                 x = x[::-1] * 0.55                       # the second, under it: mirrored, quieter
             out += x
-        return out
+        # the slow leveller: what's left of the difference between pieces,
+        # smoothed out over seconds (never more than +-4 dB)
+        e = float((out ** 2).mean())
+        self.level = getattr(self, "level", e) * 0.995 + e * 0.005              # ~4 s
+        ref = getattr(self, "ref", None)
+        if ref is None:
+            ref = self.ref = self.level
+        self.ref = ref * 0.9998 + self.level * 0.0002                          # the long-run level (~2 min)
+        want = float(np.clip(np.sqrt(self.ref / (self.level + 1e-12)), 10 ** (-4 / 20), 10 ** (4 / 20)))
+        g0 = getattr(self, "agc", 1.0)
+        self.agc = g0 + (want - g0) * 0.02
+        return out * (g0 + (self.agc - g0) * np.arange(1, BLOCK + 1) / BLOCK)
 
 
 class StormCycle:
